@@ -23,7 +23,7 @@ class ProjectCreate(BaseModel):
     description: str | None = None
     script_content: str | None = None
     style_preset: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    project_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectUpdate(BaseModel):
@@ -33,7 +33,7 @@ class ProjectUpdate(BaseModel):
     script_content: str | None = None
     style_preset: str | None = None
     status: ProjectStatus | None = None
-    metadata: dict[str, Any] | None = None
+    project_metadata: dict[str, Any] | None = None
 
 
 class ProjectResponse(BaseModel):
@@ -46,7 +46,7 @@ class ProjectResponse(BaseModel):
     style_preset: str | None
     output_video_path: str | None
     error_message: str | None
-    metadata: dict[str, Any]
+    project_metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
@@ -79,7 +79,7 @@ class CharacterCreate(BaseModel):
     prompt_base: str
     reference_image_path: str
     voice_id: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    character_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class CharacterUpdate(BaseModel):
@@ -88,7 +88,7 @@ class CharacterUpdate(BaseModel):
     prompt_base: str | None = None
     reference_image_path: str | None = None
     voice_id: str | None = None
-    metadata: dict[str, Any] | None = None
+    character_metadata: dict[str, Any] | None = None
 
 
 class CharacterResponse(BaseModel):
@@ -99,7 +99,7 @@ class CharacterResponse(BaseModel):
     prompt_base: str
     reference_image_path: str
     voice_id: str | None
-    metadata: dict[str, Any]
+    character_metadata: dict[str, Any]
     created_at: datetime
 
     model_config = {"from_attributes": True}

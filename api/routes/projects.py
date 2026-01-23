@@ -44,7 +44,7 @@ def create_project(
         description=project_in.description,
         script_content=project_in.script_content,
         style_preset=project_in.style_preset,
-        metadata=project_in.metadata,
+        project_metadata=project_in.project_metadata,
     )
     
     session.add(project)

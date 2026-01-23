@@ -73,7 +73,7 @@ class Project(SQLModel, table=True):
     output_video_path: str | None = None
     
     error_message: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    project_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -143,7 +143,7 @@ class Character(SQLModel, table=True):
     reference_image_path: str
     voice_id: str | None = None
     
-    metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    character_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
