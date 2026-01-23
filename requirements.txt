@@ -4,9 +4,11 @@ sqlmodel
 pydantic-settings
 celery
 redis
-moviepy
+moviepy>=2.0.0
 langchain
 langchain-community
 python-dotenv
 requests
 openai
+langchain-openai
+langchain-google-genai
