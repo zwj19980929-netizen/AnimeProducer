@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlmodel
+pydantic-settings
+celery
+redis
+moviepy
+langchain
+langchain-community
+python-dotenv
+requests
+openai
