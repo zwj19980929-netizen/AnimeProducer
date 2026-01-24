@@ -121,27 +121,35 @@ class AssetManager:
         """
         logger.info("Extracting characters from novel text")
         
-        prompt = f"""Analyze the following novel text and extract all main characters with their visual traits.
+        prompt = f"""You are an expert character designer and novel analyst.
+Your task is to analyze the provided novel text and extract detailed profiles for all MAIN characters.
+Focus specifically on visual traits that can be used to generate character reference images.
 
-For each character, provide:
-- name: The character's name
-- hair_color: Hair color description
-- eye_color: Eye color description
-- clothing: Typical clothing/outfit description
-- personality_keywords: List of personality trait keywords
-- physical_features: Other notable physical features
-- age_range: Approximate age range (e.g., "young adult", "teenager", "middle-aged")
+Instructions:
+1. Identify all MAIN characters. Do not include minor background characters unless they are visually distinct and important.
+2. For each character, infer their visual appearance from the text. If a specific trait (like hair color) is not explicitly stated, infer it from their personality or archetype if reasonable, OR leave it blank if totally unknown.
+3. Be consistent. If a character is described with "golden locks", put "Blonde" or "Gold" in hair_color.
+4. Extract personality keywords that might influence their visual vibe (e.g., "gloomy", "cheerful", "stern").
+
+Fields to extract:
+- name: The character's primary name.
+- hair_color: Hair color and style (e.g., "Long silver hair", "Short messy black hair").
+- eye_color: Eye color and shape (e.g., "Sharp blue eyes").
+- clothing: Typical outfit described (e.g., "Worn leather armor", "School uniform").
+- personality_keywords: List of 3-5 keywords.
+- physical_features: Height, build, scars, accessories (e.g., "Tall and muscular", "Wears glasses").
+- age_range: Specific age or range (e.g., "17 years old", "Late 40s").
 
 Novel text:
 ---
 {novel_text}
 ---
 
-Return a JSON object with a "characters" array containing objects with the above fields.
-If a trait is not mentioned in the text, leave it as an empty string or empty list."""
+Return ONLY the valid JSON object matching the requested schema."""
 
         try:
-            result = llm_client.generate_structured_output(prompt, CharacterListResponse)
+            # Use lower temperature for more deterministic extraction
+            result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.1)
             
             if result is None:
                 logger.warning("LLM returned None, returning empty character list")

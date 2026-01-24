@@ -22,7 +22,7 @@ class LLMClient:
             convert_system_message_to_human=True
         )
 
-    def generate_structured_output(self, prompt: str, pydantic_model: BaseModel):
+    def generate_structured_output(self, prompt: str, pydantic_model: BaseModel, temperature: float = 0.2):
         parser = PydanticOutputParser(pydantic_object=pydantic_model)
         format_instructions = parser.get_format_instructions()
 
@@ -30,7 +30,9 @@ class LLMClient:
             "You are a helpful AI assistant.\n{format_instructions}\n\n{prompt}"
         )
 
-        chain = chat_prompt | self.llm | parser
+        # Bind temperature to the model for this call
+        llm_with_temp = self.llm.bind(temperature=temperature)
+        chain = chat_prompt | llm_with_temp | parser
 
         try:
             return chain.invoke({"prompt": prompt, "format_instructions": format_instructions})
