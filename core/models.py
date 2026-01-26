@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 from uuid import uuid4
 
 from sqlmodel import Column, Field, SQLModel, JSON
@@ -152,7 +152,9 @@ class Shot(SQLModel, table=True):
     """Shot definition from storyboard."""
     __tablename__ = "shots"
 
-    shot_id: int = Field(primary_key=True)
+    # [核心修复] 改为 Optional 并设置 default=None，允许数据库自动生成自增 ID
+    shot_id: Optional[int] = Field(default=None, primary_key=True)
+
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
 
     duration: float
