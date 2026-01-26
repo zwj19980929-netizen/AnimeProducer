@@ -9,15 +9,15 @@ from config import settings
 class LLMClient:
     def __init__(self):
         # Using Google Generative AI integration for Gemini models
-        # Requires GOOGLE_API_KEY env var (managed via settings)
         api_key = settings.GOOGLE_API_KEY
         if not api_key:
             print("Warning: GOOGLE_API_KEY is not set. Using dummy key for initialization.")
             api_key = "dummy_key_for_init"
 
+        # 使用配置文件中的 LLM_MODEL
         self.llm = ChatGoogleGenerativeAI(
             google_api_key=api_key,
-            model="gemini-1.5-pro",
+            model=settings.LLM_MODEL,
             temperature=0.7,
             convert_system_message_to_human=True
         )

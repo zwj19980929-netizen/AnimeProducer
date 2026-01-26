@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     # LLM API Keys
     GOOGLE_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
+    LLM_MODEL: str = "gemini-1.5-pro"
 
     # Image Generation
     NANO_BANANA_API_KEY: str = ""
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     # TTS Settings
     TTS_BACKEND: str = "openai"  # openai, edge, google
     TTS_API_KEY: str = ""
+    TTS_MODEL: str = "tts-1"
     TTS_DEFAULT_VOICE: str = "alloy"
 
     # VLM Settings

@@ -1,7 +1,3 @@
-"""
-VLM (Vision Language Model) Client for keyframe scoring and evaluation.
-Supports Gemini Vision and GPT-4o for multi-dimensional image analysis.
-"""
 import base64
 import json
 import logging
@@ -44,30 +40,21 @@ class VLMClient:
 
     def __init__(
         self,
-        provider: str = "gemini",
+        provider: Optional[str] = None,
         model: Optional[str] = None,
         mock_mode: Optional[bool] = None,
     ):
         """
         Initialize VLM client.
-
-        Args:
-            provider: "gemini" or "openai"
-            model: Model name override
-            mock_mode: Force mock mode. If None, auto-detect based on API key.
         """
-        self.provider = provider
-        self.model = model or self._default_model()
+        self.provider = provider or settings.VLM_BACKEND
+        # 优先使用传入的 model，否则使用配置文件的 VLM_MODEL
+        self.model = model or settings.VLM_MODEL
         self._mock_mode = mock_mode
         self._client = None
 
         if not self._is_mock_mode():
             self._init_client()
-
-    def _default_model(self) -> str:
-        if self.provider == "openai":
-            return "gpt-4o"
-        return "gemini-1.5-pro"
 
     def _is_mock_mode(self) -> bool:
         if self._mock_mode is not None:
@@ -93,6 +80,8 @@ class VLMClient:
         except Exception as e:
             logger.warning(f"Failed to initialize VLM client: {e}. Falling back to mock mode.")
             self._mock_mode = True
+
+    # ... 保持原有的 _encode_image, _build_scoring_prompt, _parse_score_response 等方法不变 ...
 
     def _encode_image(self, image_path: str) -> str:
         """Encode image to base64."""
@@ -256,14 +245,6 @@ Only return the JSON, no other text."""
     ) -> List[ScoredCandidate]:
         """
         Score multiple keyframe candidates.
-
-        Args:
-            candidates: List of dicts with 'id' and 'image_path' keys
-            scene_description: Text description of the scene
-            characters: List of character dicts with 'name' and 'description'
-
-        Returns:
-            List of ScoredCandidate objects sorted by weighted_total (descending)
         """
         prompt = self._build_scoring_prompt(scene_description, characters)
         results: List[ScoredCandidate] = []

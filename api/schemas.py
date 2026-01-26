@@ -239,7 +239,7 @@ class ShotRenderListResponse(BaseModel):
 
 class PipelineStartRequest(BaseModel):
     """Request schema for starting the full pipeline."""
-    project_id: str
+    project_id: str | None = None
     skip_asset_generation: bool = False
     parallel_renders: int = Field(default=3, ge=1, le=10)
 

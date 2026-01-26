@@ -299,7 +299,7 @@ def generate_project_storyboard(
     responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
 )
 def start_pipeline(
-    project_id: str,
+    project_id: str,  # Path parameter
     request: PipelineStartRequest,
     session: DBSession,
     director: DirectorDep,
@@ -308,9 +308,10 @@ def start_pipeline(
     Trigger: Start the full production pipeline (Rendering).
     """
     logger.info(f"Starting pipeline for project: {project_id}")
+    actual_project_id = project_id
 
     try:
-        job = director.director.start_render_job(project_id)
+        job = director.director.start_render_job(actual_project_id)
 
         return PipelineStartResponse(
             job_id=job.id,

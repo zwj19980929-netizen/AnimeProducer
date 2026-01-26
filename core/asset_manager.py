@@ -110,8 +110,11 @@ Novel text:
 Return ONLY the valid JSON object matching the requested schema."""
 
         try:
-            result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.1)
+            result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.7)
             if result is None: return []
+            print("1"*100)
+            print(result)
+            print("1"*100)
 
             characters = []
             for char_data in result.characters:
