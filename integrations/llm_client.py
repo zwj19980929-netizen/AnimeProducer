@@ -1,4 +1,3 @@
-import os
 import logging
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -7,48 +6,63 @@ from pydantic import BaseModel
 
 from config import settings
 
+# 配置日志记录器
 logger = logging.getLogger(__name__)
+
 
 class LLMClient:
     def __init__(self):
-        # Using Google Generative AI integration for Gemini models
+        """
+        初始化 LLM 客户端
+        使用 LangChain 的 Google Gemini 集成
+        """
         api_key = settings.GOOGLE_API_KEY
         if not api_key:
-            print("Warning: GOOGLE_API_KEY is not set. Using dummy key for initialization.")
+            logger.warning("GOOGLE_API_KEY is not set. LLM calls will fail.")
             api_key = "dummy_key_for_init"
 
-        # 配置参数：增加超时时间到 300秒 (5分钟)
-        # 不同的 langchain 版本对 timeout 的传递方式略有不同，
-        # 通常直接传 timeout 或 transport_kwargs
+        # 初始化 ChatGoogleGenerativeAI
+        # 核心配置说明：
+        # 1. model: 读取 .env 中的设置 (建议使用 gemini-2.5-flash-lite 以获得最快速度)
+        # 2. timeout: 设置为 300秒，这是解决 "Server disconnected" 问题的关键
+        # 3. max_retries: 网络波动时自动重试
         self.llm = ChatGoogleGenerativeAI(
             google_api_key=api_key,
             model=settings.LLM_MODEL,
             temperature=0.7,
             convert_system_message_to_human=True,
-            # [核心修复] 强制设置超长超时时间，防止分镜生成中断
-            timeout=300.0,
+            timeout=300.0,  # <--- [关键修复] 防止分镜生成时 60s 超时
             max_retries=3,
-            transport="rest", # 有时 rest 比 grpc 在代理下更稳定
         )
 
     def generate_structured_output(self, prompt: str, pydantic_model: BaseModel, temperature: float = 0.2):
+        """
+        生成结构化数据 (JSON)
+        用于从小说中提取角色、生成分镜等需要严格格式的场景
+        """
+        # 创建 Pydantic 解析器
         parser = PydanticOutputParser(pydantic_object=pydantic_model)
         format_instructions = parser.get_format_instructions()
 
+        # 构建 Prompt 模板
         chat_prompt = ChatPromptTemplate.from_template(
             "You are a helpful AI assistant.\n{format_instructions}\n\n{prompt}"
         )
 
-        # Bind temperature to the model for this call
+        # 绑定特定的 temperature (通常结构化提取需要较低的温度以保证准确性)
         llm_with_temp = self.llm.bind(temperature=temperature)
+
+        # 组装处理链: Prompt -> LLM -> Parser
         chain = chat_prompt | llm_with_temp | parser
 
         try:
+            # 执行调用
             return chain.invoke({"prompt": prompt, "format_instructions": format_instructions})
         except Exception as e:
             logger.error(f"Error calling LLM: {e}")
-            # [建议] 这里最好抛出异常而不是返回 None，以便上层知道是网络挂了还是解析挂了
-            # raise e
+            # 返回 None 表示失败，上层逻辑(如 Director) 会据此判断是否需要重试或报错
             return None
 
+
+# 单例实例
 llm_client = LLMClient()
