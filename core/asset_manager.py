@@ -6,15 +6,14 @@ import json
 import logging
 import os
 import re
-import uuid
 import shutil
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from config import settings
 from core.database import engine
@@ -68,7 +67,7 @@ class AssetManager:
         :param session: Optional injected DB session
         :param base_assets_dir: Base directory for assets
         """
-        self.session = session # <--- [修复] 接收 session
+        self.session = session
         self.base_assets_dir = Path(base_assets_dir or settings.ASSETS_DIR)
         logger.info(f"AssetManager initialized with base_assets_dir: {self.base_assets_dir}")
 
@@ -110,11 +109,8 @@ Novel text:
 Return ONLY the valid JSON object matching the requested schema."""
 
         try:
-            result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.7)
+            result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.1)
             if result is None: return []
-            print("1"*100)
-            print(result)
-            print("1"*100)
 
             characters = []
             for char_data in result.characters:
@@ -152,7 +148,6 @@ Return ONLY the valid JSON object matching the requested schema."""
         self._ensure_dir(character_dir)
         reference_image_path = str(character_dir / "current_ref.png")
 
-        # 决定使用哪个 session
         db = session or self.session
         should_close = False
         if not db:
@@ -164,6 +159,10 @@ Return ONLY the valid JSON object matching the requested schema."""
             if existing:
                 existing.prompt_base = prompt_base
                 existing.reference_image_path = reference_image_path
+                # 修复：如果是旧数据缺失 project_id，这里顺便补上
+                if not existing.project_id:
+                    existing.project_id = project_id
+
                 db.add(existing)
                 db.commit()
                 db.refresh(existing)
@@ -171,6 +170,7 @@ Return ONLY the valid JSON object matching the requested schema."""
             else:
                 character = Character(
                     character_id=character_id,
+                    project_id=project_id,  # <--- [核心修复] 添加了 project_id
                     name=draft.name,
                     prompt_base=prompt_base,
                     reference_image_path=reference_image_path
@@ -191,7 +191,8 @@ Return ONLY the valid JSON object matching the requested schema."""
         project_id: Optional[str] = None
     ) -> List[Candidate]:
         if project_id is None:
-            project_id = character.character_id.split("_")[0]
+            # 如果 character 对象里有 project_id 最好，没有则尝试从 ID 解析
+            project_id = character.project_id or character.character_id.split("_")[0]
 
         logger.info(f"Generating {n} reference images for character '{character.name}'")
         character_dir = self._get_character_dir(project_id, character.character_id)
@@ -258,7 +259,6 @@ Return ONLY the valid JSON object matching the requested schema."""
         return best.path
 
     def get_reference_images(self, character_ids: List[str]) -> Dict[str, Optional[str]]:
-        # 这里简单起见，读 DB 最好也传入 session，或者用 engine
         result: Dict[str, Optional[str]] = {}
         with Session(engine) as session:
             for char_id in character_ids:
