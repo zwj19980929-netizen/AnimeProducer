@@ -6,12 +6,37 @@ from typing import Dict, Any
 from sqlmodel import Session
 
 from core.database import engine
-from core.models import Shot, ShotRender, ShotRenderStatus
+from core.models import Shot, ShotRender, ShotRenderStatus, Character
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
 from tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_VOICE_ID = "alloy"
+
+
+def get_voice_for_shot(shot: Shot, session: Session) -> str:
+    """
+    根据镜头中的角色获取合适的 voice_id
+    
+    逻辑：
+    1. 检查 shot.characters_in_shot 列表
+    2. 如果有对话角色，查询第一个角色的 voice_id
+    3. 如果角色没有设置 voice_id，返回默认值 "alloy"
+    4. 如果没有角色，返回默认值 "alloy"
+    """
+    if not shot.characters_in_shot:
+        return DEFAULT_VOICE_ID
+    
+    first_character_id = shot.characters_in_shot[0]
+    character = session.get(Character, first_character_id)
+    
+    if character and character.voice_id:
+        return character.voice_id
+    
+    return DEFAULT_VOICE_ID
+
 
 # 初始化全局流水线实例
 # 这就是为什么代码可以变短：繁重的逻辑都封装在 ShotPipeline (core/pipeline.py) 里了
@@ -63,6 +88,9 @@ def render_shot(self, shot_id: int):
         # 获取关联的 Render 记录 ID
         render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
         render_id = render_record.id if render_record else None
+        
+        # 动态获取 voice_id
+        voice_id = get_voice_for_shot(shot, session) if shot else DEFAULT_VOICE_ID
 
     if not shot:
         logger.error(f"Shot {shot_id} not found!")
@@ -81,7 +109,7 @@ def render_shot(self, shot_id: int):
             visual_prompt=shot.visual_prompt,
             dialogue=shot.dialogue,
             camera_movement=shot.camera_movement,
-            voice_id="alloy",  # 默认声音，后续可从 Character 表获取
+            voice_id=voice_id,
             target_duration=shot.duration,
             alignment_strategy=AlignmentStrategy.LOOP
         )

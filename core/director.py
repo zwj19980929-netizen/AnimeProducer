@@ -24,6 +24,7 @@ from core.models import (
 # 移除 core.database 的 engine 导入，因为我们不再自己创建连接
 from core.script_parser import script_parser
 from core.asset_manager import asset_manager
+from integrations.llm_client import llm_client
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,78 @@ class Director:
         self.session.refresh(project)
 
         logger.info(f"Ingested novel for project: {project_id}, text length: {len(text)}")
+        
+        self.auto_detect_genre_and_style(project_id)
+        
+        return project
+
+    def auto_detect_genre_and_style(self, project_id: str) -> Project:
+        """
+        在项目启动时自动判定题材和生成画风约束
+        
+        1. 获取项目内容（小说开篇或第一章）
+        2. 调用 LLM 分析题材（东方玄幻/赛博朋克/日系校园等）
+        3. 根据题材生成全局画风提示词
+        4. 保存到 Project.genre 和 Project.style_preset
+        """
+        from pydantic import BaseModel
+        
+        project = self.session.get(Project, project_id)
+        if not project:
+            raise ProjectNotFoundError(f"Project not found: {project_id}")
+        
+        if not project.script_content:
+            logger.warning(f"Project {project_id} has no script content, skipping genre detection")
+            return project
+        
+        class GenreStyleResponse(BaseModel):
+            genre: str
+            genre_name: str
+            style_preset: str
+        
+        prompt = f"""分析以下小说内容，判定其题材类型和推荐的画风风格。
+
+题材选项：
+- 东方玄幻 (chinese_fantasy)
+- 西方奇幻 (western_fantasy)
+- 现代都市 (modern_urban)
+- 赛博朋克 (cyberpunk)
+- 日系校园 (japanese_school)
+- 历史古风 (historical)
+- 科幻未来 (sci_fi)
+
+小说内容：
+---
+{project.script_content[:8000]}
+---
+
+返回 JSON:
+{{
+    "genre": "题材代码（如 chinese_fantasy）",
+    "genre_name": "题材中文名（如 东方玄幻）",
+    "style_preset": "详细的画风提示词约束，用于图像生成，需要是英文，包含艺术风格、色调、渲染风格等"
+}}"""
+
+        try:
+            result = llm_client.generate_structured_output(prompt, GenreStyleResponse, temperature=0.3)
+            if result:
+                project.style_preset = result.style_preset
+                if project.project_metadata is None:
+                    project.project_metadata = {}
+                project.project_metadata["genre"] = result.genre
+                project.project_metadata["genre_name"] = result.genre_name
+                project.updated_at = datetime.utcnow()
+                
+                self.session.add(project)
+                self.session.commit()
+                self.session.refresh(project)
+                
+                logger.info(f"Auto-detected genre for project {project_id}: {result.genre_name}, style_preset: {result.style_preset[:50]}...")
+            else:
+                logger.warning(f"Failed to detect genre for project {project_id}, using default style")
+        except Exception as e:
+            logger.error(f"Error detecting genre for project {project_id}: {e}")
+        
         return project
 
     def build_assets(self, project_id: str) -> Project:
@@ -110,7 +183,8 @@ class Director:
                     character=character,
                     style_spec=project.style_preset or "anime style",
                     n=4,
-                    project_id=project_id
+                    project_id=project_id,
+                    style_preset=project.style_preset
                 )
                 if candidates:
                     # 传入 session 以保存选择

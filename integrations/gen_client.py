@@ -35,14 +35,21 @@ class GenClient:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
                 self.client = None
 
-    def generate_image(self, prompt: str, reference_image_path: str = None) -> bytes:
+    def generate_image(self, prompt: str, reference_image_path: str = None, style_preset: str = None) -> bytes:
         """
         Generates a real image using Google's Imagen model.
+        
+        :param prompt: The main prompt for image generation
+        :param reference_image_path: Optional reference image path (unused currently)
+        :param style_preset: Optional global style preset to enforce consistent art style
         """
         if not self.client:
             raise RuntimeError("Google GenAI Client not initialized (Missing API Key).")
 
-        enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
+        if style_preset:
+            enhanced_prompt = f"{prompt}, {style_preset}"
+        else:
+            enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
 
         logger.info(f"🎨 Generating REAL image with {self.model_name}...")
 

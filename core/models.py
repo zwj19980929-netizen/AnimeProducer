@@ -53,6 +53,14 @@ class ShotRenderStatus(str, Enum):
     FAILURE = "FAILURE"
 
 
+class ChapterStatus(str, Enum):
+    """Chapter processing states."""
+    PENDING = "PENDING"
+    EXTRACTING = "EXTRACTING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
 # ============================================================================
 # Project and Job Tables
 # ============================================================================
@@ -69,6 +77,7 @@ class Project(SQLModel, table=True):
 
     script_content: str | None = None
     style_preset: str | None = None
+    genre: str | None = None
 
     output_video_path: str | None = None
 
@@ -148,6 +157,25 @@ class Character(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class CharacterState(SQLModel, table=True):
+    """Character state for tracking visual evolution across chapters."""
+    __tablename__ = "character_states"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    character_id: str = Field(foreign_key="characters.character_id", index=True)
+
+    state_name: str  # e.g., "transformation", "costume_change", "dark_form"
+    trigger_chapter: int = Field(default=0)  # Chapter where this state is triggered
+
+    visual_changes: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    prompt_override: str | None = None  # New prompt for this state
+    reference_image_path: str | None = None
+
+    is_active: bool = Field(default=True)
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Shot(SQLModel, table=True):
     """Shot definition from storyboard."""
     __tablename__ = "shots"
@@ -163,9 +191,32 @@ class Shot(SQLModel, table=True):
     camera_movement: str
 
     characters_in_shot: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    character_states: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
     dialogue: str | None = None
     action_type: str | None = None
 
     sequence_order: int = Field(default=0)
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============================================================================
+# Chapter and CharacterState Tables
+# ============================================================================
+
+
+class Chapter(SQLModel, table=True):
+    """Chapter for multi-chapter novel support."""
+    __tablename__ = "chapters"
+
+    chapter_id: str = Field(default_factory=generate_uuid, primary_key=True)
+    project_id: str = Field(foreign_key="projects.id", index=True)
+
+    chapter_number: int = Field(index=True)
+    title: str | None = None
+    content: str
+
+    status: ChapterStatus = Field(default=ChapterStatus.PENDING)
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
