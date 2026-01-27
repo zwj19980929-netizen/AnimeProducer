@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AnimeMatrix 控制台</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 20px auto; line-height: 1.6; background: #f4f7f6; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h2 { border-bottom: 2px solid #3498db; padding-bottom: 10px; color: #2c3e50; }
+        label { display: block; margin: 10px 0 5px; font-weight: bold; }
+        input, textarea, button { width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { background: #3498db; color: white; border: none; cursor: pointer; font-size: 16px; transition: background 0.3s; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: #bdc3c7; }
+        #log { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 4px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 13px; }
+        .status { font-weight: bold; color: #e67e22; }
+    </style>
+</head>
+<body>
+
+    <h1>🎬 AnimeMatrix 自动化工作流</h1>
+
+    <div class="card">
+        <h2>第一步：创建项目</h2>
+        <label>项目名称</label>
+        <input type="text" id="projName" placeholder="例如：我的仙侠动画">
+        <label>小说正文</label>
+        <textarea id="novelContent" rows="5" placeholder="在此输入小说文本..."></textarea>
+        <button id="btnCreate">创建并导入小说</button>
+        <p>当前项目 ID: <span id="currentId" class="status">尚未创建</span></p>
+    </div>
+
+    <div class="card">
+        <h2>第二步：执行流水线</h2>
+        <div style="display: flex; gap: 10px;">
+            <button id="btnAssets" disabled>1. 提取角色资产</button>
+            <button id="btnStoryboard" disabled>2. 生成分镜表</button>
+            <button id="btnRender" disabled>3. 启动全自动渲染</button>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>任务状态</h2>
+        <p>Job ID: <span id="jobId" class="status">无</span></p>
+        <div id="log">等待操作...</div>
+    </div>
+
+    <script>
+        const BASE_URL = 'http://localhost:8000/api/v1';
+        let projectId = '';
+        let jobId = '';
+
+        const log = (msg) => {
+            const el = document.getElementById('log');
+            el.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`;
+            el.scrollTop = el.scrollHeight;
+        };
+
+        // 1. 创建项目并更新文本
+        document.getElementById('btnCreate').onclick = async () => {
+            const name = document.getElementById('projName').value;
+            const content = document.getElementById('novelContent').value;
+
+            try {
+                // 调用 POST /projects
+                const res = await fetch(`${BASE_URL}/projects`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name, script_content: content })
+                });
+                const data = await res.json();
+
+                projectId = data.id;
+                document.getElementById('currentId').innerText = projectId;
+                log(`项目创建成功: ${projectId}`);
+
+                // 激活后续按钮
+                document.getElementById('btnAssets').disabled = false;
+                document.getElementById('btnStoryboard').disabled = false;
+                document.getElementById('btnRender').disabled = false;
+            } catch (e) { log(`错误: ${e.message}`); }
+        };
+
+        // 2. 提取资产 (调用 /projects/{id}/assets/build)
+        document.getElementById('btnAssets').onclick = async () => {
+            log("正在提取角色并生成参考图...");
+            const res = await fetch(`${BASE_URL}/projects/${projectId}/assets/build`, { method: 'POST' });
+            if(res.ok) log("资产构建完成！");
+        };
+
+        // 3. 生成分镜 (调用 /projects/{id}/storyboard/generate)
+        document.getElementById('btnStoryboard').onclick = async () => {
+            log("正在解析剧本生成分镜...");
+            const res = await fetch(`${BASE_URL}/projects/${projectId}/storyboard/generate`, { method: 'POST' });
+            const data = await res.json();
+            log(`分镜生成成功，共 ${data.total} 个镜头`);
+        };
+
+        // 4. 启动渲染 (调用 /projects/{id}/pipeline/start)
+        document.getElementById('btnRender').onclick = async () => {
+            log("正在启动全流程渲染 (Celery)...");
+            const res = await fetch(`${BASE_URL}/projects/${projectId}/pipeline/start`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            });
+            const data = await res.json();
+            jobId = data.job_id;
+            document.getElementById('jobId').innerText = jobId;
+            log(`流水线已启动！Job ID: ${jobId}`);
+
+            // 开始轮询状态
+            pollStatus();
+        };
+
+        // 轮询 Job 状态
+        async function pollStatus() {
+            if(!jobId) return;
+            const res = await fetch(`${BASE_URL}/jobs/${jobId}`);
+            const data = await res.json();
+            log(`进度: ${(data.progress * 100).toFixed(1)}% | 状态: ${data.status}`);
+
+            if(data.status !== 'SUCCESS' && data.status !== 'FAILURE') {
+                setTimeout(pollStatus, 3000);
+            } else if(data.status === 'SUCCESS') {
+                log("🎉 视频制作完成！请检查 assets/output 目录。");
+            }
+        }
+    </script>
+</body>
+</html>
