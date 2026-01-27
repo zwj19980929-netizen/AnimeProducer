@@ -8,9 +8,9 @@ Editor - 视频编辑与合成模块
 """
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from moviepy import (
     VideoFileClip,
@@ -40,6 +40,7 @@ class ShotArtifact:
     dialogue: Optional[str] = None
     start_time: float = 0.0
     end_time: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def duration(self) -> float:

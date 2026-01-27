@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = 3
     RETRY_DELAY: float = 1.0
 
+    # Multi-Provider Settings
+    REPLICATE_API_TOKEN: str = ""
+    VIDEO_PROVIDER: str = "google"  # google, replicate, openai
+    IMAGE_PROVIDER: str = "google"  # google, replicate, openai
+    BACKUP_VIDEO_PROVIDERS: str = "replicate,openai"  # 逗号分隔的备用列表
+    BACKUP_IMAGE_PROVIDERS: str = "replicate,openai"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

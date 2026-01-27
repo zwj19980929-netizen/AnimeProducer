@@ -1,6 +1,7 @@
 import logging
 import io
 import os
+from typing import Optional
 from PIL import Image
 
 try:
@@ -10,15 +11,18 @@ except ImportError:
     raise ImportError("Please install the Google GenAI SDK: pip install google-genai")
 
 from config import settings
+from integrations.base_client import BaseImageClient, QuotaExceededError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
 
-class GenClient:
+class GenClient(BaseImageClient):
     """
     Real Image Generation Client using Google GenAI SDK.
     Strict mode: No mocks.
     """
+    
+    provider_name: str = "google"
 
     def __init__(self):
         self.api_key = settings.GOOGLE_API_KEY
@@ -35,7 +39,13 @@ class GenClient:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
                 self.client = None
 
-    def generate_image(self, prompt: str, reference_image_path: str = None, style_preset: str = None) -> bytes:
+    def generate_image(
+        self,
+        prompt: str,
+        reference_image_path: Optional[str] = None,
+        style_preset: Optional[str] = None,
+        **kwargs
+    ) -> bytes:
         """
         Generates a real image using Google's Imagen model.
         
@@ -102,6 +112,11 @@ class GenClient:
                 raise RuntimeError("API returned success but no images found.")
 
         except Exception as e:
+            error_str = str(e).lower()
+            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
+                raise QuotaExceededError(f"Google API quota exceeded: {e}")
+            if "401" in error_str or "403" in error_str or "authentication" in error_str:
+                raise AuthenticationError(f"Google API authentication failed: {e}")
             logger.error(f"❌ Google Image Generation Failed: {e}")
             raise e
 

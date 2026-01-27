@@ -13,13 +13,13 @@ from datetime import datetime
 from typing import List, Optional, Dict
 import os
 
-from sqlmodel import Session, select
+from sqlmodel import Session, select, func
 
 from core.models import (
     Project, ProjectStatus,
     Job, JobStatus,
     Shot, ShotRender, ShotRenderStatus,
-    Character
+    Character, Chapter, ChapterStatus
 )
 # 移除 core.database 的 engine 导入，因为我们不再自己创建连接
 from core.script_parser import script_parser
@@ -315,3 +315,75 @@ class Director:
 
         logger.info(f"Started render job {job.id} for project {project_id}")
         return job
+
+    def generate_chapter_storyboard(self, project_id: str, chapter_id: str) -> List[Shot]:
+        """
+        为特定章节生成分镜
+        
+        1. 验证项目和章节存在
+        2. 从 Chapter 表提取 content
+        3. 调用 LLM 生成分镜
+        4. 将生成的 Shot 记录绑定至 chapter_id
+        """
+        project = self.session.get(Project, project_id)
+        if not project:
+            raise ProjectNotFoundError(f"Project not found: {project_id}")
+        
+        chapter = self.session.get(Chapter, chapter_id)
+        if not chapter:
+            raise InvalidProjectStateError(f"Chapter not found: {chapter_id}")
+        
+        if chapter.project_id != project_id:
+            raise InvalidProjectStateError(f"Chapter {chapter_id} does not belong to project {project_id}")
+        
+        # 清除该章节的旧分镜
+        existing_shots = self.session.exec(
+            select(Shot).where(Shot.chapter_id == chapter_id)
+        ).all()
+        
+        if existing_shots:
+            logger.info(f"Clearing {len(existing_shots)} existing shots for chapter {chapter_id}")
+            for shot in existing_shots:
+                self.session.delete(shot)
+            self.session.flush()
+        
+        # 获取该章节之前的镜头数量，用于计算 sequence_order
+        previous_shots_count = self.session.exec(
+            select(func.count()).select_from(Shot).where(
+                Shot.project_id == project_id,
+                Shot.chapter_id != chapter_id
+            )
+        ).one() or 0
+        
+        # 调用 LLM 生成分镜
+        raw_shots = script_parser.parse_novel_to_storyboard(chapter.content)
+        
+        shots = []
+        for idx, raw_shot in enumerate(raw_shots):
+            shot = Shot(
+                project_id=project_id,
+                chapter_id=chapter_id,
+                sequence_order=previous_shots_count + idx,
+                duration=raw_shot.duration,
+                scene_description=raw_shot.scene_description,
+                visual_prompt=raw_shot.visual_prompt,
+                camera_movement=raw_shot.camera_movement,
+                characters_in_shot=raw_shot.characters_in_shot,
+                dialogue=raw_shot.dialogue,
+                action_type=raw_shot.action_type
+            )
+            self.session.add(shot)
+            shots.append(shot)
+        
+        # 更新章节状态
+        chapter.status = ChapterStatus.READY
+        chapter.updated_at = datetime.utcnow()
+        self.session.add(chapter)
+        
+        self.session.commit()
+        
+        for shot in shots:
+            self.session.refresh(shot)
+        
+        logger.info(f"Generated storyboard for chapter {chapter_id}: {len(shots)} shots")
+        return shots

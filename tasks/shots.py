@@ -6,7 +6,7 @@ from typing import Dict, Any
 from sqlmodel import Session
 
 from core.database import engine
-from core.models import Shot, ShotRender, ShotRenderStatus, Character
+from core.models import Shot, ShotRender, ShotRenderStatus, Character, CharacterState
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
 from tasks.celery_app import celery_app
@@ -36,6 +36,36 @@ def get_voice_for_shot(shot: Shot, session: Session) -> str:
         return character.voice_id
     
     return DEFAULT_VOICE_ID
+
+
+def get_reference_image_for_shot(shot: Shot, session: Session) -> str | None:
+    """
+    根据镜头中的角色状态获取参考图
+    
+    优先级：
+    1. 如果 shot.character_states 指定了特定状态，使用 CharacterState 的参考图
+    2. 回退至 Character 表的默认参考图
+    3. 如果都没有，返回 None
+    """
+    if not shot.characters_in_shot:
+        return None
+    
+    first_character_id = shot.characters_in_shot[0]
+    
+    # 检查是否有指定的角色状态
+    if shot.character_states and first_character_id in shot.character_states:
+        state_id = shot.character_states[first_character_id]
+        character_state = session.get(CharacterState, state_id)
+        if character_state and character_state.reference_image_path:
+            logger.info(f"Using CharacterState reference: {character_state.state_name}")
+            return character_state.reference_image_path
+    
+    # 回退至角色默认参考图
+    character = session.get(Character, first_character_id)
+    if character and character.reference_image_path:
+        return character.reference_image_path
+    
+    return None
 
 
 # 初始化全局流水线实例
@@ -91,6 +121,9 @@ def render_shot(self, shot_id: int):
         
         # 动态获取 voice_id
         voice_id = get_voice_for_shot(shot, session) if shot else DEFAULT_VOICE_ID
+        
+        # 动态获取参考图（支持角色状态）
+        reference_image_path = get_reference_image_for_shot(shot, session) if shot else None
 
     if not shot:
         logger.error(f"Shot {shot_id} not found!")
@@ -110,6 +143,7 @@ def render_shot(self, shot_id: int):
             dialogue=shot.dialogue,
             camera_movement=shot.camera_movement,
             voice_id=voice_id,
+            reference_image_path=reference_image_path,
             target_duration=shot.duration,
             alignment_strategy=AlignmentStrategy.LOOP
         )
@@ -133,7 +167,8 @@ def render_shot(self, shot_id: int):
             "video_path": artifact.video_path,
             "audio_path": artifact.audio_path,
             "duration": artifact.duration,
-            "dialogue": shot.dialogue
+            "dialogue": shot.dialogue,
+            "provider_used": getattr(artifact, 'metadata', {}).get('provider', 'unknown')
         }
 
     except Exception as e:

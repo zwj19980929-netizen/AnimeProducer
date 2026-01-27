@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional, Protocol, TypeVar
 
 from config import settings
 from core.editor import AlignmentStrategy, ShotArtifact
+from integrations.base_client import QuotaExceededError, AuthenticationError
+from integrations.provider_factory import ProviderFactory
 
 logger = logging.getLogger(__name__)
 
@@ -375,14 +377,18 @@ class VideoGenerator(PipelineComponent):
     def __init__(
         self, 
         video_generator: Optional[VideoGeneratorProtocol] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        enable_failover: bool = True
     ):
         super().__init__("VideoGenerator")
         self._video_generator = video_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
+        self._enable_failover = enable_failover
+        self._current_provider = None
         
         if self._video_generator is None:
-            self._video_generator = self._create_default_generator()
+            from integrations.video_client import video_client
+            self._video_generator = video_client
     
     def _create_default_generator(self) -> VideoGeneratorProtocol:
         """创建默认视频生成器（mock 实现）"""
@@ -396,6 +402,55 @@ class VideoGenerator(PipelineComponent):
                 logger.debug(f"[MOCK] Generating video from {image_path}")
                 return b"mock_video_data"
         return MockVideoGenerator()
+    
+    def _generate_with_failover(
+        self,
+        image_path: str,
+        motion_prompt: Optional[str],
+        duration: float
+    ) -> tuple[bytes, str]:
+        """
+        带熔断的视频生成，失败时自动切换 Provider
+        
+        Returns:
+            tuple: (video_bytes, provider_name)
+        """
+        try:
+            primary_client = ProviderFactory.get_video_client()
+            self._current_provider = primary_client.provider_name
+            video_data = primary_client.generate_video(
+                image_path=image_path,
+                motion_prompt=motion_prompt,
+                duration=duration
+            )
+            return video_data, primary_client.provider_name
+        except (QuotaExceededError, AuthenticationError) as e:
+            self.logger.warning(f"Primary provider failed: {e}")
+            
+            if not self._enable_failover:
+                raise
+            
+            backup_providers = ProviderFactory.get_backup_video_providers()
+            for provider_name in backup_providers:
+                try:
+                    self.logger.info(f"Trying backup provider: {provider_name}")
+                    backup_client = ProviderFactory.get_video_client(provider_name)
+                    self._current_provider = backup_client.provider_name
+                    video_data = backup_client.generate_video(
+                        image_path=image_path,
+                        motion_prompt=motion_prompt,
+                        duration=duration
+                    )
+                    self.logger.info(f"Backup provider {provider_name} succeeded")
+                    return video_data, provider_name
+                except (QuotaExceededError, AuthenticationError) as backup_error:
+                    self.logger.warning(f"Backup provider {provider_name} failed: {backup_error}")
+                    continue
+                except NotImplementedError:
+                    self.logger.debug(f"Provider {provider_name} not implemented, skipping")
+                    continue
+            
+            raise RuntimeError("All video providers failed")
     
     def process(self, request: VideoGenRequest) -> VideoGenResult:
         """
@@ -420,11 +475,19 @@ class VideoGenerator(PipelineComponent):
         if request.camera_movement:
             motion_prompt = f"{motion_prompt or ''}, {request.camera_movement}".strip(", ")
         
-        video_data = self._video_generator.generate_video(
-            image_path=request.image_path,
-            motion_prompt=motion_prompt,
-            duration=request.duration
-        )
+        if self._enable_failover:
+            video_data, provider_used = self._generate_with_failover(
+                image_path=request.image_path,
+                motion_prompt=motion_prompt,
+                duration=request.duration
+            )
+        else:
+            video_data = self._video_generator.generate_video(
+                image_path=request.image_path,
+                motion_prompt=motion_prompt,
+                duration=request.duration
+            )
+            provider_used = getattr(self._video_generator, 'provider_name', 'unknown')
         
         if not video_data:
             raise RuntimeError(f"Failed to generate video for shot {request.shot_id}")
@@ -445,6 +508,7 @@ class VideoGenerator(PipelineComponent):
             video_path=video_path,
             duration=request.duration,
             metadata={
+                "provider": provider_used,
                 "source_image": request.image_path,
                 "motion_prompt": motion_prompt,
                 "camera_movement": request.camera_movement
@@ -755,7 +819,8 @@ class ShotPipeline:
             audio_path=audio_path,
             dialogue=dialogue,
             start_time=0.0,
-            end_time=final_duration
+            end_time=final_duration,
+            metadata=video_result.metadata
         )
         
         self.logger.info(f"Shot {shot_id} processed successfully: {final_duration:.2f}s")

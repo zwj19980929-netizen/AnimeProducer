@@ -102,6 +102,7 @@ class Job(SQLModel, table=True):
     progress: float = Field(default=0.0)  # 0.0 to 1.0
 
     result: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    provider_used: str | None = None
     error_message: str | None = None
     error_traceback: str | None = None
 
@@ -184,6 +185,7 @@ class Shot(SQLModel, table=True):
     shot_id: Optional[int] = Field(default=None, primary_key=True)
 
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    chapter_id: str | None = Field(default=None, foreign_key="chapters.chapter_id", index=True)
 
     duration: float
     scene_description: str
