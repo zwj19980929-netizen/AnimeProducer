@@ -59,10 +59,35 @@ class Settings(BaseSettings):
 
     # Multi-Provider Settings
     REPLICATE_API_TOKEN: str = ""
-    VIDEO_PROVIDER: str = "google"  # google, replicate, openai
-    IMAGE_PROVIDER: str = "google"  # google, replicate, openai
-    BACKUP_VIDEO_PROVIDERS: str = "replicate,openai"  # 逗号分隔的备用列表
-    BACKUP_IMAGE_PROVIDERS: str = "replicate,openai"
+    VIDEO_PROVIDER: str = "google"  # google, replicate, volcengine, aliyun
+    IMAGE_PROVIDER: str = "google"  # google, replicate, aliyun
+    BACKUP_VIDEO_PROVIDERS: str = "volcengine,aliyun,replicate"
+    BACKUP_IMAGE_PROVIDERS: str = "aliyun,replicate"
+
+    # 火山引擎 (字节跳动)
+    VOLCENGINE_ACCESS_KEY: str = ""
+    VOLCENGINE_SECRET_KEY: str = ""
+    VOLCENGINE_REGION: str = "cn-north-1"
+
+    # 阿里云万相
+    ALIYUN_ACCESS_KEY_ID: str = ""
+    ALIYUN_ACCESS_KEY_SECRET: str = ""
+    ALIYUN_REGION: str = "cn-shanghai"
+    ALIYUN_WANX_MODEL: str = "wanx-v1"
+
+    # LLM Provider Settings
+    LLM_PROVIDER: str = "google"  # google, openai, doubao, deepseek
+    BACKUP_LLM_PROVIDERS: str = "deepseek,doubao"
+
+    # 豆包 (字节跳动)
+    DOUBAO_API_KEY: str = ""
+    DOUBAO_MODEL: str = "doubao-pro-32k"
+    DOUBAO_ENDPOINT: str = "https://ark.cn-beijing.volces.com/api/v3"
+
+    # DeepSeek
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_ENDPOINT: str = "https://api.deepseek.com/v1"
 
     model_config = SettingsConfigDict(
         env_file=".env",
