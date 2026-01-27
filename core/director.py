@@ -48,7 +48,7 @@ class Director:
         :param session: 注入的数据库会话
         :param max_workers: 最大并发数
         """
-        self.session = session  # <--- [修复] 接收并存储注入的 session
+        self.session = session  # 接收并存储注入的 session
         self.max_workers = max_workers
 
     def create_project(self, name: str, description: Optional[str] = None) -> Project:
@@ -65,7 +65,7 @@ class Director:
         text: str,
         chapter_meta: Optional[Dict] = None
     ) -> Project:
-        # 直接使用 self.session，不再使用 with Session(engine)
+        # 直接使用 self.session
         project = self.session.get(Project, project_id)
         if not project:
             raise ProjectNotFoundError(f"Project not found: {project_id}")
@@ -94,14 +94,6 @@ class Director:
         logger.info(f"Extracting characters for project {project_id}...")
 
         # 使用 asset_manager 提取角色
-        # 注意：这里我们临时将 session 传递给 asset_manager 的方法（如果需要）
-        # 或者确保 asset_manager 能处理。鉴于 asset_manager 当前是全局单例，
-        # 我们这里调用 create_or_update_character 时需要稍微改动一下调用方式，
-        # 最好是直接在这里处理数据库，或者让 asset_manager 支持传入 session。
-
-        # 为了兼容性，我们修改下方的调用，手动处理 DB 部分，
-        # 或者假设 asset_manager 已经被我们修复支持 session 注入。
-
         character_drafts = asset_manager.extract_characters(project.script_content)
 
         if not character_drafts:
@@ -109,7 +101,6 @@ class Director:
 
         for draft in character_drafts:
             # 调用 asset_manager 创建角色，传入当前的 session
-            # 注意：我们需要修改 asset_manager.create_or_update_character 以支持 session 参数
             character = asset_manager.create_or_update_character(project_id, draft, session=self.session)
 
             # 检查参考图
@@ -144,7 +135,8 @@ class Director:
                 f"Project {project_id} has no script content."
             )
 
-        # 清除旧分镜
+        # 1. 清除旧分镜
+        # 注意：这里我们只删除，不需要担心 ID 冲突，因为新生成的 ID 会自增
         existing_shots = self.session.exec(
             select(Shot).where(Shot.project_id == project_id)
         ).all()
@@ -153,17 +145,17 @@ class Director:
             logger.info(f"Clearing {len(existing_shots)} existing shots for rebuild.")
             for shot in existing_shots:
                 self.session.delete(shot)
-            # 这里可以不立即 commit，最后一起 commit
+            # 显式提交一次删除，确保旧数据被清理
+            self.session.flush()
 
-        # 调用 LLM
+        # 2. 调用 LLM 生成数据
         raw_shots = script_parser.parse_novel_to_storyboard(project.script_content)
 
         shots = []
         for idx, raw_shot in enumerate(raw_shots):
             shot = Shot(
-                shot_id=idx + 1,
                 project_id=project_id,
-                sequence_order=idx,
+                sequence_order=idx,  # 使用 sequence_order 来记录它是第几个镜头(0, 1, 2...)
                 duration=raw_shot.duration,
                 scene_description=raw_shot.scene_description,
                 visual_prompt=raw_shot.visual_prompt,
@@ -171,6 +163,7 @@ class Director:
                 characters_in_shot=raw_shot.characters_in_shot,
                 dialogue=raw_shot.dialogue,
                 action_type=raw_shot.action_type
+                # 注意：此处未设置 shot_id，由数据库自动生成全局唯一 ID
             )
             self.session.add(shot)
             shots.append(shot)
@@ -178,9 +171,11 @@ class Director:
         project.status = ProjectStatus.STORYBOARD_READY
         project.updated_at = datetime.utcnow()
         self.session.add(project)
+
+        # 3. 提交事务
         self.session.commit()
 
-        # 刷新 shot ID
+        # 4. 刷新对象以获取数据库生成的 ID
         for shot in shots:
             self.session.refresh(shot)
 

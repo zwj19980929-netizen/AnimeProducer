@@ -3,7 +3,7 @@ import io
 import base64
 from PIL import Image
 
-# [核心变化] 引入新的 SDK 包名
+# 引入新的 SDK 包名
 from google import genai
 from google.genai import types
 
@@ -27,7 +27,7 @@ class GenClient:
             logger.warning("GOOGLE_API_KEY is not set. Image generation will fail.")
         else:
             try:
-                # [核心变化] 新版客户端初始化方式
+                # 新版客户端初始化方式
                 self.client = genai.Client(api_key=self.api_key)
             except Exception as e:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
@@ -50,33 +50,29 @@ class GenClient:
         logger.debug(f"Prompt: {enhanced_prompt}")
 
         try:
-            # [核心变化] 新版生成接口调用方式
-            response = self.client.models.generate_image(
+            # [修复核心] 方法名和配置类必须是复数形式 (generate_images)
+            response = self.client.models.generate_images(
                 model=self.model_name,
                 prompt=enhanced_prompt,
-                config=types.GenerateImageConfig(
+                config=types.GenerateImagesConfig(  # <-- 注意这里也是 GenerateImagesConfig
                     number_of_images=1,
                     aspect_ratio="1:1",
                     safety_filter_level="BLOCK_ONLY_HIGH",
-                    # 如果需要指定输出格式，新版通常默认返回 Image 对象或 base64
                 )
             )
 
-            # [核心变化] 处理新版响应结构
-            # response.generated_images 是一个列表
+            # 处理响应
             if response.generated_images:
                 image_data = response.generated_images[0]
 
-                # 新版 SDK 通常返回 PIL Image 对象或者包含 image_bytes 的对象
-                # 如果是 PIL Image 对象:
+                # SDK 返回的对象通常包含 image 属性 (PIL Image)
                 if hasattr(image_data, 'image'):
-                    # 这是一个 GeneratedImage 对象，里面有个 .image (PIL Image)
                     pil_img = image_data.image
                     output_buffer = io.BytesIO()
                     pil_img.save(output_buffer, format="PNG")
                     return output_buffer.getvalue()
 
-                # 如果直接是 bytes
+                # 或者直接是 bytes
                 elif isinstance(image_data, bytes):
                     return image_data
 
