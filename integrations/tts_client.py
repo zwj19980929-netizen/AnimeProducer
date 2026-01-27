@@ -26,17 +26,13 @@ class TTSClient:
 
     def __init__(
         self,
-        backend: TTSBackend = "openai",
+        backend: Optional[TTSBackend] = None,
         mock_mode: Optional[bool] = None,
     ):
         """
         Initialize TTS client.
-
-        Args:
-            backend: TTS backend to use ("openai", "google", "edge", "mock")
-            mock_mode: Force mock mode. If None, auto-detect based on API availability.
         """
-        self.backend = backend
+        self.backend = backend or settings.TTS_BACKEND
         self._mock_mode = mock_mode
         self._client = None
 
@@ -92,16 +88,19 @@ class TTSClient:
     def _generate_openai(self, text: str, voice_id: str) -> bytes:
         """Generate speech using OpenAI TTS."""
         valid_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-        voice = voice_id if voice_id in valid_voices else "nova"
+        voice = voice_id if voice_id in valid_voices else settings.TTS_DEFAULT_VOICE
 
+        # 使用配置文件中的 TTS_MODEL
         response = self._client.audio.speech.create(
-            model="tts-1",
+            model=settings.TTS_MODEL,
             voice=voice,
             input=text,
             response_format="wav",
         )
 
         return response.content
+
+    # ... 其余方法保持不变 ...
 
     async def _generate_edge(self, text: str, voice_id: str) -> bytes:
         """Generate speech using Edge TTS (Microsoft)."""
@@ -129,13 +128,6 @@ class TTSClient:
     ) -> bytes:
         """
         Generate speech audio from text.
-
-        Args:
-            text: Text to convert to speech
-            voice_id: Voice identifier (backend-specific)
-
-        Returns:
-            Audio data as bytes (WAV format)
         """
         if not text or not text.strip():
             logger.warning("Empty text provided, returning silence")
@@ -170,12 +162,6 @@ class TTSClient:
     def get_audio_duration(self, audio_path: str) -> float:
         """
         Get duration of an audio file in seconds.
-
-        Args:
-            audio_path: Path to audio file
-
-        Returns:
-            Duration in seconds
         """
         path = Path(audio_path)
         if not path.exists():
@@ -214,12 +200,6 @@ class TTSClient:
     def generate_silence(self, duration: float) -> bytes:
         """
         Generate silent audio of specified duration.
-
-        Args:
-            duration: Duration in seconds
-
-        Returns:
-            Silent WAV audio as bytes
         """
         if duration <= 0:
             duration = 0.1
@@ -240,13 +220,6 @@ class TTSClient:
     def save_audio(self, audio_data: bytes, output_path: str) -> bool:
         """
         Save audio data to file.
-
-        Args:
-            audio_data: Audio bytes
-            output_path: Destination path
-
-        Returns:
-            True if saved successfully
         """
         try:
             path = Path(output_path)

@@ -56,7 +56,7 @@ def create_character(
         prompt_base=character_in.prompt_base,
         reference_image_path=character_in.reference_image_path,
         voice_id=character_in.voice_id,
-        metadata=character_in.metadata,
+        character_metadata=character_in.character_metadata,
     )
     
     session.add(character)

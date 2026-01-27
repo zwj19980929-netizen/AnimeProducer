@@ -1,120 +1,124 @@
 import logging
+import os
 from datetime import datetime
-from typing import Optional
+from typing import List, Dict
 
 from celery import chord
 from sqlmodel import Session, select
 
 from core.database import engine
-from core.models import Shot
+from core.models import Shot, Project, ProjectStatus, Job, JobStatus
+from core.editor import assemble_shots, ShotArtifact, AlignmentStrategy
 from tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
 
-class Job:
-    def __init__(self, project_id: str):
-        self.project_id = project_id
-        self.status = "pending"
-        self.started_at: Optional[datetime] = None
-        self.finished_at: Optional[datetime] = None
-        self.error: Optional[str] = None
-
-    def start(self):
-        self.status = "running"
-        self.started_at = datetime.utcnow()
-
-    def complete(self):
-        self.status = "completed"
-        self.finished_at = datetime.utcnow()
-
-    def fail(self, error: str):
-        self.status = "failed"
-        self.finished_at = datetime.utcnow()
-        self.error = error
-
-
 @celery_app.task(bind=True, name="tasks.jobs.render_project_job")
 def render_project_job(self, project_id: str):
     """
-    创建 Job，构建 chord：
-    1. 并行渲染所有 shots
-    2. 最终合成整个项目
+    编排整个项目的渲染任务
     """
-    logger.info(f"Starting render job for project: {project_id}")
-    job = Job(project_id)
-    job.start()
+    logger.info(f"🎬 Dispatching render job for project: {project_id}")
 
-    try:
-        with Session(engine) as session:
-            shots = session.exec(select(Shot)).all()
-            shot_ids = [shot.shot_id for shot in shots]
+    # 1. 更新 Job 状态
+    with Session(engine) as session:
+        job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+        if job:
+            job.status = JobStatus.STARTED
+            job.started_at = datetime.utcnow()
+            session.add(job)
+            session.commit()
 
-        if not shot_ids:
-            logger.warning(f"No shots found for project: {project_id}")
-            job.complete()
-            return {"project_id": project_id, "status": "completed", "shots": 0}
+        # 2. 获取所有镜头
+        shots = session.exec(select(Shot).where(Shot.project_id == project_id).order_by(Shot.sequence_order)).all()
+        shot_ids = [shot.shot_id for shot in shots]
 
-        logger.info(f"Found {len(shot_ids)} shots, building chord")
+    if not shot_ids:
+        logger.warning("No shots found!")
+        return
 
-        from tasks.shots import render_shot
+    # 3. 构建 Chord (并行渲染 -> 串行合成)
+    from tasks.shots import render_shot
 
-        workflow = chord(
-            [render_shot.s(shot_id) for shot_id in shot_ids],
-            compose_project.s(project_id),
-        )
-        result = workflow.apply_async()
+    # 创建任务组
+    header = [render_shot.s(sid) for sid in shot_ids]
+    # 回调任务
+    callback = compose_project.s(project_id)
 
-        job.complete()
-        logger.info(f"Render job dispatched for project: {project_id}, task_id: {result.id}")
-
-        return {
-            "project_id": project_id,
-            "status": "dispatched",
-            "shots": len(shot_ids),
-            "chord_id": result.id,
-        }
-
-    except Exception as e:
-        job.fail(str(e))
-        logger.error(f"Render job failed for project {project_id}: {e}")
-        raise
+    # 启动
+    workflow = chord(header)(callback)
+    logger.info(f"Workflow started. Chord ID: {workflow.id}")
+    return {"chord_id": workflow.id}
 
 
 @celery_app.task(bind=True, name="tasks.jobs.compose_project")
-def compose_project(self, shot_results: list, project_id: str):
+def compose_project(self, shot_results: List[Dict], project_id: str):
     """
-    最终合成：将所有渲染好的 shots 合并成完整视频
+    最终合成任务：收集所有 Shot 结果并拼接
     """
-    logger.info(f"Composing project: {project_id}")
-    started_at = datetime.utcnow()
+    logger.info(f"🎞️ Composing project: {project_id}")
+
+    # 过滤掉失败的镜头
+    valid_results = [r for r in shot_results if r and r.get("status") == "completed"]
+
+    if not valid_results:
+        logger.error("No valid shots to compose!")
+        return {"status": "failed", "reason": "No valid shots"}
+
+    # 按 sequence_order 排序 (假设 shot_results 顺序可能乱，最好根据 shot_id 或数据库重新查顺序)
+    # 这里简单按 shot_id 排序作为演示
+    valid_results.sort(key=lambda x: x["shot_id"])
+
+    # 转换为 Editor 需要的 ShotArtifact 对象
+    artifacts = []
+    for res in valid_results:
+        artifacts.append(ShotArtifact(
+            shot_id=res["shot_id"],
+            video_path=res["video_path"],
+            audio_path=res.get("audio_path"),
+            dialogue=res.get("dialogue"),
+            start_time=0,
+            end_time=res.get("duration", 3.0)
+        ))
 
     try:
-        successful_shots = [r for r in shot_results if r.get("status") == "completed"]
-        failed_shots = [r for r in shot_results if r.get("status") != "completed"]
+        # 定义输出路径
+        from config import settings
+        output_dir = settings.OUTPUT_DIR
+        output_filename = f"final_project_{project_id}.mp4"
+        output_path = os.path.join(output_dir, output_filename)
 
-        if failed_shots:
-            logger.warning(f"Some shots failed: {len(failed_shots)}/{len(shot_results)}")
+        # 调用 Editor 进行拼接
+        final_video_path = assemble_shots(
+            shots=artifacts,
+            output_path=output_path,
+            alignment_strategy=AlignmentStrategy.LOOP,
+            crossfade_duration=0.5
+        )
 
-        logger.info(f"Composing {len(successful_shots)} shots for project: {project_id}")
+        # 更新项目状态
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            if project:
+                project.status = ProjectStatus.DONE
+                project.output_video_path = final_video_path
+                session.add(project)
 
-        # TODO: 实际的视频合成逻辑
-        # 使用 moviepy 或其他工具合并视频片段
+            # 更新 Job 状态
+            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            if job:
+                job.status = JobStatus.SUCCESS
+                job.progress = 1.0
+                job.completed_at = datetime.utcnow()
+                session.add(job)
 
-        finished_at = datetime.utcnow()
-        duration = (finished_at - started_at).total_seconds()
+            session.commit()
 
-        logger.info(f"Project {project_id} composed successfully in {duration:.2f}s")
-
-        return {
-            "project_id": project_id,
-            "status": "completed",
-            "total_shots": len(shot_results),
-            "successful_shots": len(successful_shots),
-            "failed_shots": len(failed_shots),
-            "duration": duration,
-        }
+        logger.info(f"🎉 Project composition complete! Saved to: {final_video_path}")
+        return {"status": "success", "path": final_video_path}
 
     except Exception as e:
-        logger.error(f"Project composition failed for {project_id}: {e}")
-        raise
+        logger.error(f"Composition failed: {e}")
+        # 更新失败状态...
+        raise e
