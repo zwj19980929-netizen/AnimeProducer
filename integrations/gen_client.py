@@ -1,108 +1,103 @@
 import logging
 import io
-import base64
+import os
 from PIL import Image
 
-# 引入新的 SDK 包名
-from google import genai
-from google.genai import types
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    raise ImportError("Please install the Google GenAI SDK: pip install google-genai")
 
 from config import settings
 
-# 配置日志
 logger = logging.getLogger(__name__)
 
 
 class GenClient:
     """
-    Image Generation Client using the new Google GenAI SDK (v1.0+).
-    Wraps the 'google.genai' library to access Imagen 3 models.
+    Real Image Generation Client using Google GenAI SDK.
+    Strict mode: No mocks.
     """
 
     def __init__(self):
         self.api_key = settings.GOOGLE_API_KEY
-        self.client = None
+        # 使用之前检测到的可用模型
+        self.model_name = "imagen-4.0-generate-001"
 
         if not self.api_key:
-            logger.warning("GOOGLE_API_KEY is not set. Image generation will fail.")
+            logger.error("GOOGLE_API_KEY is not set. Image generation will fail.")
+            self.client = None
         else:
             try:
-                # 新版客户端初始化方式
                 self.client = genai.Client(api_key=self.api_key)
             except Exception as e:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
-
-        # 指定 Imagen 模型版本
-        self.model_name = "imagen-3.0-generate-001"
+                self.client = None
 
     def generate_image(self, prompt: str, reference_image_path: str = None) -> bytes:
         """
-        Generates an image using Google's Imagen model via new SDK.
+        Generates a real image using Google's Imagen model.
         """
         if not self.client:
-            logger.error("Cannot generate image: Client not initialized.")
-            return None
+            raise RuntimeError("Google GenAI Client not initialized (Missing API Key).")
 
-        # 优化提示词
         enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
 
-        logger.info(f"Generating image with Google GenAI ({self.model_name})...")
-        logger.debug(f"Prompt: {enhanced_prompt}")
+        logger.info(f"🎨 Generating REAL image with {self.model_name}...")
 
         try:
-            # [修复核心] 方法名和配置类必须是复数形式 (generate_images)
             response = self.client.models.generate_images(
                 model=self.model_name,
                 prompt=enhanced_prompt,
-                config=types.GenerateImagesConfig(  # <-- 注意这里也是 GenerateImagesConfig
+                config=types.GenerateImagesConfig(
                     number_of_images=1,
                     aspect_ratio="1:1",
-                    safety_filter_level="BLOCK_ONLY_HIGH",
+                    output_mime_type="image/png",
                 )
             )
 
-            # 处理响应
             if response.generated_images:
-                image_data = response.generated_images[0]
+                image_entry = response.generated_images[0]
 
-                # SDK 返回的对象通常包含 image 属性 (PIL Image)
-                if hasattr(image_data, 'image'):
-                    pil_img = image_data.image
-                    output_buffer = io.BytesIO()
-                    pil_img.save(output_buffer, format="PNG")
-                    return output_buffer.getvalue()
+                # -------------------------------------------------------
+                # 🛠️ 修复逻辑：更强壮的数据提取方式
+                # -------------------------------------------------------
 
-                # 或者直接是 bytes
-                elif isinstance(image_data, bytes):
-                    return image_data
+                # 1. 尝试直接从 GeneratedImage 条目获取 bytes
+                if hasattr(image_entry, 'image_bytes') and image_entry.image_bytes:
+                    return image_entry.image_bytes
 
-                # 兜底：检查是否有 image_bytes 属性
-                elif hasattr(image_data, 'image_bytes'):
-                    return image_data.image_bytes
+                # 2. 检查 image 属性
+                if hasattr(image_entry, 'image'):
+                    img_obj = image_entry.image
 
-                else:
-                    logger.error(f"Unknown image data format: {type(image_data)}")
-                    return None
+                    # 情况 A: image 是 Google 的 types.Image 包装器 (有 image_bytes 属性)
+                    if hasattr(img_obj, 'image_bytes') and img_obj.image_bytes:
+                        return img_obj.image_bytes
+
+                    # 情况 B: image 是 PIL.Image 对象 (这是旧版或某些调用的行为)
+                    if isinstance(img_obj, Image.Image):
+                        output_buffer = io.BytesIO()
+                        img_obj.save(output_buffer, format="PNG")
+                        return output_buffer.getvalue()
+
+                    # 情况 C: image 是 types.Image 但没有 image_bytes，尝试手动处理
+                    # 有些版本的 SDK 可能把数据藏在 .data 或其他地方，或者这是一个我们未知的对象
+                    # 但通常上面的步骤已经能覆盖了。
+
+                    # 最后尝试：如果它看起来像 PIL 但不是 PIL，打印类型以供调试
+                    logger.warning(f"Unknown image object type: {type(img_obj)}")
+
+                # 如果都拿不到，抛出详细错误
+                raise RuntimeError(f"Could not extract bytes from response. Entry dir: {dir(image_entry)}")
             else:
-                logger.error("Google Imagen returned no images.")
-                return None
+                raise RuntimeError("API returned success but no images found.")
 
         except Exception as e:
-            logger.error(f"Error generating image with Google GenAI: {e}")
-            if "404" in str(e) or "not found" in str(e).lower():
-                logger.error(f"Model '{self.model_name}' not found. Check your API key permissions.")
-            return None
+            logger.error(f"❌ Google Image Generation Failed: {e}")
+            raise e
 
 
 # 单例实例
 gen_client = GenClient()
-
-
-# 占位符类，防止 ImportError
-class NanoBananaClient:
-    def __init__(self):
-        logger.warning("NanoBananaClient is deprecated and replaced by Google GenAI.")
-
-    def generate_image(self, *args, **kwargs):
-        logger.error("NanoBananaClient is disabled.")
-        return None

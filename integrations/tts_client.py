@@ -1,12 +1,10 @@
 """
-TTS (Text-to-Speech) Client for voice synthesis.
-Supports multiple TTS backends with configurable voice settings.
+TTS Client for voice synthesis using OpenAI.
+Strict mode: No mocks.
 """
 import io
 import logging
 import os
-import struct
-import wave
 from pathlib import Path
 from typing import Optional, Literal
 
@@ -14,112 +12,27 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-TTSBackend = Literal["openai", "google", "edge", "mock"]
-
-
 class TTSClient:
-    """Text-to-Speech client supporting multiple backends."""
+    """Text-to-Speech client strictly using OpenAI."""
 
-    SAMPLE_RATE = 24000
-    CHANNELS = 1
-    SAMPLE_WIDTH = 2  # 16-bit audio
-
-    def __init__(
-        self,
-        backend: Optional[TTSBackend] = None,
-        mock_mode: Optional[bool] = None,
-    ):
-        """
-        Initialize TTS client.
-        """
-        self.backend = backend or settings.TTS_BACKEND
-        self._mock_mode = mock_mode
+    def __init__(self):
+        # 强制使用 OpenAI，忽略配置文件的 backend 设置如果它不是 openai
+        self.backend = "openai"
+        self.api_key = settings.OPENAI_API_KEY
         self._client = None
 
-        if not self._is_mock_mode():
-            self._init_client()
+        if not self.api_key:
+            # 尝试从环境变量获取
+            self.api_key = os.getenv("OPENAI_API_KEY")
 
-    def _is_mock_mode(self) -> bool:
-        if self._mock_mode is not None:
-            return self._mock_mode
-
-        if self.backend == "mock":
-            return True
-
-        if self.backend == "openai":
-            return not os.getenv("OPENAI_API_KEY")
-
-        if self.backend == "google":
-            return not settings.GOOGLE_API_KEY
-
-        return False
-
-    def _init_client(self) -> None:
-        try:
-            if self.backend == "openai":
+        if not self.api_key:
+            logger.error("OPENAI_API_KEY is not set. TTS will fail.")
+        else:
+            try:
                 from openai import OpenAI
-                self._client = OpenAI()
-            elif self.backend == "google":
-                logger.info("Google TTS client initialized (placeholder)")
-            elif self.backend == "edge":
-                logger.info("Edge TTS client initialized (uses edge-tts package)")
-        except Exception as e:
-            logger.warning(f"Failed to initialize TTS client: {e}. Falling back to mock mode.")
-            self._mock_mode = True
-
-    def _generate_mock_audio(self, text: str, duration: Optional[float] = None) -> bytes:
-        """Generate mock WAV audio data for testing."""
-        if duration is None:
-            words = len(text.split())
-            duration = max(1.0, words * 0.3)
-
-        num_samples = int(self.SAMPLE_RATE * duration)
-        samples = [0] * num_samples
-
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(self.CHANNELS)
-            wav_file.setsampwidth(self.SAMPLE_WIDTH)
-            wav_file.setframerate(self.SAMPLE_RATE)
-            wav_file.writeframes(struct.pack(f"<{num_samples}h", *samples))
-
-        return buffer.getvalue()
-
-    def _generate_openai(self, text: str, voice_id: str) -> bytes:
-        """Generate speech using OpenAI TTS."""
-        valid_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
-        voice = voice_id if voice_id in valid_voices else settings.TTS_DEFAULT_VOICE
-
-        # 使用配置文件中的 TTS_MODEL
-        response = self._client.audio.speech.create(
-            model=settings.TTS_MODEL,
-            voice=voice,
-            input=text,
-            response_format="wav",
-        )
-
-        return response.content
-
-    # ... 其余方法保持不变 ...
-
-    async def _generate_edge(self, text: str, voice_id: str) -> bytes:
-        """Generate speech using Edge TTS (Microsoft)."""
-        try:
-            import edge_tts
-        except ImportError:
-            logger.error("edge-tts package not installed. Run: pip install edge-tts")
-            return self._generate_mock_audio(text)
-
-        voice = voice_id or "zh-CN-XiaoxiaoNeural"
-
-        communicate = edge_tts.Communicate(text, voice)
-        buffer = io.BytesIO()
-
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                buffer.write(chunk["data"])
-
-        return buffer.getvalue()
+                self._client = OpenAI(api_key=self.api_key)
+            except Exception as e:
+                logger.error(f"Failed to initialize OpenAI Client: {e}")
 
     def generate_speech(
         self,
@@ -127,113 +40,58 @@ class TTSClient:
         voice_id: str = "nova",
     ) -> bytes:
         """
-        Generate speech audio from text.
+        Generate real speech using OpenAI TTS.
         """
+        if not self._client:
+            raise RuntimeError("OpenAI Client not initialized (Missing API Key).")
+
         if not text or not text.strip():
-            logger.warning("Empty text provided, returning silence")
-            return self.generate_silence(0.5)
+            logger.warning("Empty text provided for TTS.")
+            return b""
+
+        logger.info(f"🗣️ Generating REAL speech with OpenAI (Voice: {voice_id})...")
 
         try:
-            if self._is_mock_mode():
-                logger.info(f"[MOCK] Generating speech for: {text[:50]}...")
-                return self._generate_mock_audio(text)
+            # 确保使用有效的 OpenAI Voice ID
+            valid_voices = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"]
+            voice = voice_id if voice_id in valid_voices else "alloy"
 
-            logger.info(f"Generating speech with {self.backend}: {text[:50]}...")
+            response = self._client.audio.speech.create(
+                model="tts-1", # 或 tts-1-hd
+                voice=voice,
+                input=text,
+                response_format="mp3",
+            )
 
-            if self.backend == "openai":
-                return self._generate_openai(text, voice_id)
-
-            elif self.backend == "edge":
-                import asyncio
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    import nest_asyncio
-                    nest_asyncio.apply()
-                return asyncio.run(self._generate_edge(text, voice_id))
-
-            else:
-                logger.warning(f"Backend {self.backend} not fully implemented, using mock")
-                return self._generate_mock_audio(text)
+            # response.content 包含二进制音频数据
+            return response.content
 
         except Exception as e:
-            logger.error(f"TTS generation failed: {e}")
-            return self._generate_mock_audio(text)
+            logger.error(f"❌ OpenAI TTS Generation Failed: {e}")
+            raise e
 
     def get_audio_duration(self, audio_path: str) -> float:
-        """
-        Get duration of an audio file in seconds.
-        """
-        path = Path(audio_path)
-        if not path.exists():
-            logger.error(f"Audio file not found: {audio_path}")
-            return 0.0
-
+        """Get duration using moviepy (since we have it installed)."""
         try:
-            suffix = path.suffix.lower()
-
-            if suffix == ".wav":
-                with wave.open(str(path), "rb") as wav_file:
-                    frames = wav_file.getnframes()
-                    rate = wav_file.getframerate()
-                    return frames / float(rate)
-
-            elif suffix == ".mp3":
-                try:
-                    from mutagen.mp3 import MP3
-                    audio = MP3(str(path))
-                    return audio.info.length
-                except ImportError:
-                    logger.warning("mutagen not installed, falling back to moviepy")
-
-            try:
-                from moviepy import AudioFileClip
-                with AudioFileClip(str(path)) as clip:
-                    return clip.duration
-            except Exception as e:
-                logger.error(f"Failed to get duration with moviepy: {e}")
+            from moviepy import AudioFileClip
+            if not os.path.exists(audio_path):
                 return 0.0
-
+            with AudioFileClip(audio_path) as clip:
+                return clip.duration
         except Exception as e:
-            logger.error(f"Error getting audio duration: {e}")
-            return 0.0
-
-    def generate_silence(self, duration: float) -> bytes:
-        """
-        Generate silent audio of specified duration.
-        """
-        if duration <= 0:
-            duration = 0.1
-
-        num_samples = int(self.SAMPLE_RATE * duration)
-        samples = [0] * num_samples
-
-        buffer = io.BytesIO()
-        with wave.open(buffer, "wb") as wav_file:
-            wav_file.setnchannels(self.CHANNELS)
-            wav_file.setsampwidth(self.SAMPLE_WIDTH)
-            wav_file.setframerate(self.SAMPLE_RATE)
-            wav_file.writeframes(struct.pack(f"<{num_samples}h", *samples))
-
-        logger.debug(f"Generated {duration:.2f}s of silence")
-        return buffer.getvalue()
+            logger.error(f"Failed to get audio duration: {e}")
+            return 3.0 # Default fallback duration just to avoid crash in calculation
 
     def save_audio(self, audio_data: bytes, output_path: str) -> bool:
-        """
-        Save audio data to file.
-        """
         try:
             path = Path(output_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-
             with open(path, "wb") as f:
                 f.write(audio_data)
-
             logger.info(f"Saved audio to: {output_path}")
             return True
-
         except Exception as e:
             logger.error(f"Failed to save audio: {e}")
-            return False
-
+            raise e
 
 tts_client = TTSClient()

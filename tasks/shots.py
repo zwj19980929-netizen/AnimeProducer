@@ -48,7 +48,7 @@ def update_render_status(
         logger.error(f"Failed to update render status: {e}")
 
 
-@celery_app.task(bind=True, name="tasks.shots.render_shot")
+@celery_app.task(bind=True, name="tasks.shots.render_shot",task_acks_late = False)
 def render_shot(self, shot_id: int):
     """
     执行真正的镜头渲染流水线

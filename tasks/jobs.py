@@ -14,7 +14,7 @@ from tasks.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(bind=True, name="tasks.jobs.render_project_job")
+@celery_app.task(bind=True, name="tasks.jobs.render_project_job",task_acks_late = False)
 def render_project_job(self, project_id: str):
     """
     编排整个项目的渲染任务
@@ -52,7 +52,7 @@ def render_project_job(self, project_id: str):
     return {"chord_id": workflow.id}
 
 
-@celery_app.task(bind=True, name="tasks.jobs.compose_project")
+@celery_app.task(bind=True, name="tasks.jobs.compose_project",task_acks_late = False)
 def compose_project(self, shot_results: List[Dict], project_id: str):
     """
     最终合成任务：收集所有 Shot 结果并拼接
