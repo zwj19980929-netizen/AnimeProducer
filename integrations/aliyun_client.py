@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from typing import Optional
+
 import requests
 
 from config import settings
@@ -24,7 +25,7 @@ class AliyunWanxImageClient(BaseImageClient):
         self.access_key_secret = settings.ALIYUN_ACCESS_KEY_SECRET
         self.region = settings.ALIYUN_REGION
         self.model = settings.ALIYUN_WANX_MODEL
-        self.endpoint = f"https://dashscope.aliyuncs.com/api/v1"
+        self.endpoint = "https://dashscope.aliyuncs.com/api/v1"
         
         if not self.access_key_id:
             logger.warning("阿里云 Access Key 未配置")
@@ -126,7 +127,7 @@ class AliyunWanxVideoClient(BaseVideoClient):
     def __init__(self):
         self.access_key_id = settings.ALIYUN_ACCESS_KEY_ID
         self.access_key_secret = settings.ALIYUN_ACCESS_KEY_SECRET
-        self.endpoint = f"https://dashscope.aliyuncs.com/api/v1"
+        self.endpoint = "https://dashscope.aliyuncs.com/api/v1"
         
         if not self.access_key_id:
             logger.warning("阿里云 Access Key 未配置")

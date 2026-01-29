@@ -16,6 +16,47 @@ logger = logging.getLogger(__name__)
 DEFAULT_VOICE_ID = "alloy"
 
 
+def get_reference_image_for_shot(shot: Shot, session: Session) -> str | None:
+    """
+    根据镜头中的角色状态获取最合适的参考图
+    
+    优先级：
+    1. 如果 shot.character_states 指定了角色状态 -> 使用 CharacterState 的参考图
+    2. 否则使用 Character 表的默认参考图
+    3. 如果都没有则返回 None
+    
+    Args:
+        shot: 分镜数据
+        session: 数据库会话
+        
+    Returns:
+        参考图路径或 None
+    """
+    if not shot.characters_in_shot:
+        return None
+    
+    # 取第一个角色作为主要参考
+    first_character_id = shot.characters_in_shot[0]
+    
+    # 检查是否有指定的角色状态
+    if shot.character_states and first_character_id in shot.character_states:
+        state_id = shot.character_states[first_character_id]
+        # 查询 CharacterState 表
+        char_state = session.get(CharacterState, state_id)
+        if char_state and char_state.reference_image_path:
+            logger.debug(f"Using character state reference: {char_state.state_name}")
+            return char_state.reference_image_path
+    
+    # 回退到角色默认参考图
+    character = session.get(Character, first_character_id)
+    if character and character.reference_image_path:
+        import os
+        if os.path.exists(character.reference_image_path):
+            return character.reference_image_path
+    
+    return None
+
+
 def get_voice_for_shot(shot: Shot, session: Session) -> str:
     """
     根据镜头中的角色获取合适的 voice_id
@@ -36,36 +77,6 @@ def get_voice_for_shot(shot: Shot, session: Session) -> str:
         return character.voice_id
     
     return DEFAULT_VOICE_ID
-
-
-def get_reference_image_for_shot(shot: Shot, session: Session) -> str | None:
-    """
-    根据镜头中的角色状态获取参考图
-    
-    优先级：
-    1. 如果 shot.character_states 指定了特定状态，使用 CharacterState 的参考图
-    2. 回退至 Character 表的默认参考图
-    3. 如果都没有，返回 None
-    """
-    if not shot.characters_in_shot:
-        return None
-    
-    first_character_id = shot.characters_in_shot[0]
-    
-    # 检查是否有指定的角色状态
-    if shot.character_states and first_character_id in shot.character_states:
-        state_id = shot.character_states[first_character_id]
-        character_state = session.get(CharacterState, state_id)
-        if character_state and character_state.reference_image_path:
-            logger.info(f"Using CharacterState reference: {character_state.state_name}")
-            return character_state.reference_image_path
-    
-    # 回退至角色默认参考图
-    character = session.get(Character, first_character_id)
-    if character and character.reference_image_path:
-        return character.reference_image_path
-    
-    return None
 
 
 # 初始化全局流水线实例
@@ -122,7 +133,7 @@ def render_shot(self, shot_id: int):
         # 动态获取 voice_id
         voice_id = get_voice_for_shot(shot, session) if shot else DEFAULT_VOICE_ID
         
-        # 动态获取参考图（支持角色状态）
+        # 新增：获取角色状态参考图
         reference_image_path = get_reference_image_for_shot(shot, session) if shot else None
 
     if not shot:
@@ -141,9 +152,9 @@ def render_shot(self, shot_id: int):
             shot_id=shot.shot_id,
             visual_prompt=shot.visual_prompt,
             dialogue=shot.dialogue,
+            reference_image_path=reference_image_path,
             camera_movement=shot.camera_movement,
             voice_id=voice_id,
-            reference_image_path=reference_image_path,
             target_duration=shot.duration,
             alignment_strategy=AlignmentStrategy.LOOP
         )
@@ -160,6 +171,13 @@ def render_shot(self, shot_id: int):
         duration = (datetime.utcnow() - start_time).total_seconds()
         logger.info(f"✅ Shot {shot_id} finished in {duration:.2f}s. Video: {artifact.video_path}")
 
+        # 记录使用的厂家信息
+        providers_info = {}
+        if hasattr(pipeline.keyframe_generator, 'last_used_provider'):
+            providers_info["image"] = pipeline.keyframe_generator.last_used_provider
+        if hasattr(pipeline.video_generator, 'last_used_provider'):
+            providers_info["video"] = pipeline.video_generator.last_used_provider
+
         # 返回结果给下一个任务
         return {
             "shot_id": shot_id,
@@ -168,7 +186,7 @@ def render_shot(self, shot_id: int):
             "audio_path": artifact.audio_path,
             "duration": artifact.duration,
             "dialogue": shot.dialogue,
-            "provider_used": getattr(artifact, 'metadata', {}).get('provider', 'unknown')
+            "providers_used": providers_info
         }
 
     except Exception as e:

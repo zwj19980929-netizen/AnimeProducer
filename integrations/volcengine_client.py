@@ -10,6 +10,7 @@ import logging
 import time
 from datetime import datetime
 from typing import Optional
+
 import requests
 
 from config import settings
@@ -28,7 +29,7 @@ class VolcEngineVideoClient(BaseVideoClient):
         self.secret_key = settings.VOLCENGINE_SECRET_KEY
         self.region = settings.VOLCENGINE_REGION
         self.service = "cv"
-        self.host = f"visual.volcengineapi.com"
+        self.host = "visual.volcengineapi.com"
         
         if not self.access_key or not self.secret_key:
             logger.warning("火山引擎 Access Key 未配置")

@@ -102,9 +102,9 @@ class Job(SQLModel, table=True):
     progress: float = Field(default=0.0)  # 0.0 to 1.0
 
     result: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
-    provider_used: str | None = None
     error_message: str | None = None
     error_traceback: str | None = None
+    providers_used: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     started_at: datetime | None = None

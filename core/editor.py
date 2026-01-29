@@ -8,9 +8,9 @@ Editor - 视频编辑与合成模块
 """
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 from moviepy import (
     VideoFileClip,
@@ -40,7 +40,6 @@ class ShotArtifact:
     dialogue: Optional[str] = None
     start_time: float = 0.0
     end_time: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
     
     @property
     def duration(self) -> float:
@@ -154,6 +153,8 @@ def assemble_shots(
     
     clips: List[VideoFileClip] = []
     
+    audio_clips_to_close: list = []
+
     for i, shot in enumerate(shots):
         logger.debug(f"Processing shot {shot.shot_id}: {shot.video_path}")
         
@@ -161,11 +162,16 @@ def assemble_shots(
             video_clip = VideoFileClip(shot.video_path)
         except Exception as e:
             logger.error(f"Failed to load video for shot {shot.shot_id}: {e}")
+            for clip in clips:
+                clip.close()
+            for ac in audio_clips_to_close:
+                ac.close()
             raise
         
         if shot.audio_path and os.path.exists(shot.audio_path):
             try:
                 audio_clip = AudioFileClip(shot.audio_path)
+                audio_clips_to_close.append(audio_clip)
                 video_clip = _align_video_to_audio(
                     video_clip, 
                     audio_clip.duration, 
@@ -206,6 +212,8 @@ def assemble_shots(
     
     for clip in clips:
         clip.close()
+    for ac in audio_clips_to_close:
+        ac.close()
     final_clip.close()
     
     logger.info(f"Successfully assembled video: {output_path}")
@@ -283,40 +291,45 @@ def add_subtitles(
     if not os.path.exists(srt_path):
         raise FileNotFoundError(f"SRT file not found: {srt_path}")
     
-    video = VideoFileClip(video_path)
-    
-    def make_text_clip(txt: str) -> TextClip:
-        return TextClip(
-            text=txt,
-            font=font,
-            font_size=font_size,
-            color=font_color,
-            stroke_color=stroke_color,
-            stroke_width=stroke_width,
-            method="caption",
-            size=(video.w * 0.9, None)
+    video = None
+    final = None
+    try:
+        video = VideoFileClip(video_path)
+        
+        def make_text_clip(txt: str) -> TextClip:
+            return TextClip(
+                text=txt,
+                font=font,
+                font_size=font_size,
+                color=font_color,
+                stroke_color=stroke_color,
+                stroke_width=stroke_width,
+                method="caption",
+                size=(video.w * 0.9, None)
+            )
+        
+        subtitles = SubtitlesClip(srt_path, make_text_clip)
+        subtitles = subtitles.with_position(("center", 0.85), relative=True)
+        
+        final = CompositeVideoClip([video, subtitles])
+        
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        
+        final.write_videofile(
+            output_path,
+            fps=video.fps or 24,
+            codec="libx264",
+            audio_codec="aac",
+            logger=None
         )
-    
-    subtitles = SubtitlesClip(srt_path, make_text_clip)
-    subtitles = subtitles.with_position(("center", 0.85), relative=True)
-    
-    final = CompositeVideoClip([video, subtitles])
-    
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    
-    final.write_videofile(
-        output_path,
-        fps=video.fps or 24,
-        codec="libx264",
-        audio_codec="aac",
-        logger=None
-    )
-    
-    video.close()
-    final.close()
-    
-    logger.info(f"Successfully added subtitles: {output_path}")
-    return output_path
+        
+        logger.info(f"Successfully added subtitles: {output_path}")
+        return output_path
+    finally:
+        if final:
+            final.close()
+        if video:
+            video.close()
 
 
 def assemble_video(
@@ -339,6 +352,9 @@ def assemble_video(
     """
     logger.info(f"Assembling {len(video_paths)} videos with audio: {audio_path}")
     
+    clips = []
+    audio_clip = None
+    final_video_clip = None
     try:
         clips = [VideoFileClip(p) for p in video_paths]
         final_video_clip = concatenate_videoclips(clips)
@@ -360,14 +376,16 @@ def assemble_video(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         final_video_clip.write_videofile(output_path, fps=24, logger=None)
         
-        for clip in clips:
-            clip.close()
-        final_video_clip.close()
-        audio_clip.close()
-        
         logger.info(f"Successfully created: {output_path}")
         return output_path
 
     except Exception as e:
         logger.error(f"Error assembling video: {e}")
         raise
+    finally:
+        for clip in clips:
+            clip.close()
+        if final_video_clip:
+            final_video_clip.close()
+        if audio_clip:
+            audio_clip.close()

@@ -30,6 +30,23 @@ class Settings(BaseSettings):
     TTS_API_KEY: str = ""
     TTS_MODEL: str = "tts-1"
     TTS_DEFAULT_VOICE: str = "alloy"
+    TTS_PROVIDER: str = "openai"  # openai, doubao, aliyun, minimax, zhipu
+    
+    # 豆包 Seed-TTS (火山引擎)
+    DOUBAO_TTS_API_KEY: str = ""
+    DOUBAO_TTS_ENDPOINT: str = "https://openspeech.bytedance.com"
+    DOUBAO_TTS_APP_ID: str = ""
+    
+    # 阿里云 CosyVoice / Qwen3-TTS
+    ALIYUN_TTS_API_KEY: str = ""
+    ALIYUN_TTS_MODEL: str = "cosyvoice-v1"  # cosyvoice-v1, qwen3-tts
+    
+    # MiniMax Speech-02
+    MINIMAX_API_KEY: str = ""
+    MINIMAX_GROUP_ID: str = ""
+    
+    # 智谱 GLM-4-Voice
+    ZHIPU_API_KEY: str = ""
 
     # VLM Settings
     VLM_BACKEND: str = "gemini"  # gemini, openai
@@ -41,11 +58,26 @@ class Settings(BaseSettings):
 
     # Paths (absolute paths computed from base)
     BASE_DIR: Path = Path(__file__).parent.resolve()
-    ASSETS_DIR: str = "./assets"
-    CHARACTERS_DIR: str = "./assets/characters"
-    RAW_MATERIALS_DIR: str = "./assets/raw_materials"
-    OUTPUT_DIR: str = "./assets/output"
-    PROJECTS_DIR: str = "./assets/projects"
+
+    @property
+    def ASSETS_DIR(self) -> Path:
+        return self.BASE_DIR / "assets"
+
+    @property
+    def CHARACTERS_DIR(self) -> Path:
+        return self.BASE_DIR / "assets" / "characters"
+
+    @property
+    def RAW_MATERIALS_DIR(self) -> Path:
+        return self.BASE_DIR / "assets" / "raw_materials"
+
+    @property
+    def OUTPUT_DIR(self) -> Path:
+        return self.BASE_DIR / "assets" / "output"
+
+    @property
+    def PROJECTS_DIR(self) -> Path:
+        return self.BASE_DIR / "assets" / "projects"
 
     # Generation Settings
     KEYFRAME_CANDIDATES: int = 4
@@ -57,37 +89,41 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = 3
     RETRY_DELAY: float = 1.0
 
-    # Multi-Provider Settings
+    # ========== Multi-Provider Settings ==========
+    
+    # Replicate
     REPLICATE_API_TOKEN: str = ""
-    VIDEO_PROVIDER: str = "google"  # google, replicate, volcengine, aliyun
-    IMAGE_PROVIDER: str = "google"  # google, replicate, aliyun
-    BACKUP_VIDEO_PROVIDERS: str = "volcengine,aliyun,replicate"
-    BACKUP_IMAGE_PROVIDERS: str = "aliyun,replicate"
-
-    # 火山引擎 (字节跳动)
-    VOLCENGINE_ACCESS_KEY: str = ""
-    VOLCENGINE_SECRET_KEY: str = ""
-    VOLCENGINE_REGION: str = "cn-north-1"
-
+    
+    # DeepSeek
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_ENDPOINT: str = "https://api.deepseek.com/v1"
+    
+    # 豆包 (Doubao / 火山方舟)
+    DOUBAO_API_KEY: str = ""
+    DOUBAO_MODEL: str = "doubao-pro-4k"
+    DOUBAO_ENDPOINT: str = "https://ark.cn-beijing.volces.com/api/v3"
+    
     # 阿里云万相
     ALIYUN_ACCESS_KEY_ID: str = ""
     ALIYUN_ACCESS_KEY_SECRET: str = ""
     ALIYUN_REGION: str = "cn-shanghai"
     ALIYUN_WANX_MODEL: str = "wanx-v1"
-
-    # LLM Provider Settings
-    LLM_PROVIDER: str = "google"  # google, openai, doubao, deepseek
+    
+    # 火山引擎
+    VOLCENGINE_ACCESS_KEY: str = ""
+    VOLCENGINE_SECRET_KEY: str = ""
+    VOLCENGINE_REGION: str = "cn-north-1"
+    
+    # 默认 Provider 选择
+    IMAGE_PROVIDER: str = "google"  # google, aliyun, replicate
+    VIDEO_PROVIDER: str = "google"  # google, replicate, volcengine, aliyun
+    LLM_PROVIDER: str = "google"    # google, deepseek, doubao, openai
+    
+    # 备用 Provider 列表
+    BACKUP_IMAGE_PROVIDERS: str = "aliyun,replicate"
+    BACKUP_VIDEO_PROVIDERS: str = "volcengine,replicate,aliyun"
     BACKUP_LLM_PROVIDERS: str = "deepseek,doubao"
-
-    # 豆包 (字节跳动)
-    DOUBAO_API_KEY: str = ""
-    DOUBAO_MODEL: str = "doubao-pro-32k"
-    DOUBAO_ENDPOINT: str = "https://ark.cn-beijing.volces.com/api/v3"
-
-    # DeepSeek
-    DEEPSEEK_API_KEY: str = ""
-    DEEPSEEK_MODEL: str = "deepseek-chat"
-    DEEPSEEK_ENDPOINT: str = "https://api.deepseek.com/v1"
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -97,7 +133,7 @@ class Settings(BaseSettings):
 
     def get_project_dir(self, project_id: str) -> Path:
         """Get the directory for a specific project."""
-        return self.BASE_DIR / self.PROJECTS_DIR / project_id
+        return self.PROJECTS_DIR / project_id
 
     def get_character_dir(self, project_id: str, character_id: str) -> Path:
         """Get the directory for a specific character."""
@@ -113,7 +149,7 @@ class Settings(BaseSettings):
             self.PROJECTS_DIR,
         ]
         for d in dirs:
-            (self.BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+            d.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

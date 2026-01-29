@@ -19,8 +19,8 @@ from typing import Any, Dict, List, Optional, Protocol, TypeVar
 
 from config import settings
 from core.editor import AlignmentStrategy, ShotArtifact
-from integrations.base_client import QuotaExceededError, AuthenticationError
 from integrations.provider_factory import ProviderFactory
+from integrations.base_clients import ProviderType
 
 logger = logging.getLogger(__name__)
 
@@ -201,75 +201,83 @@ class PipelineComponent(ABC):
 
 
 class KeyframeGenerator(PipelineComponent):
-    """
-    关键帧生成器
-    
-    使用图像生成模型创建关键帧，支持注入参考图像以保持角色一致性
-    """
+    """关键帧生成器 - 支持多厂家熔断切换"""
     
     def __init__(
         self, 
         image_generator: Optional[ImageGeneratorProtocol] = None,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        preferred_provider: Optional[str] = None,
+        backup_providers: Optional[List[str]] = None
     ):
         super().__init__("KeyframeGenerator")
         self._image_generator = image_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
+        self._preferred_provider = preferred_provider
+        self._backup_providers = backup_providers or ["google", "replicate"]
+        self._last_used_provider: Optional[str] = None
         
         if self._image_generator is None:
             from integrations.gen_client import gen_client
             self._image_generator = gen_client
     
+    @property
+    def last_used_provider(self) -> Optional[str]:
+        """返回最后使用的厂家名称，用于记账"""
+        return self._last_used_provider
+    
     def process(self, request: KeyframeRequest) -> KeyframeResult:
-        """
-        生成关键帧
-        
-        Args:
-            request: 关键帧生成请求
-            
-        Returns:
-            关键帧生成结果
-            
-        Raises:
-            RuntimeError: 图像生成失败
-        """
+        """生成关键帧 - 支持熔断降级"""
         self.logger.info(f"Generating keyframe for shot {request.shot_id}")
-        self.logger.debug(f"Prompt: {request.prompt[:100]}...")
-        
-        if request.reference_image_path:
-            self.logger.debug(f"Using reference image: {request.reference_image_path}")
         
         full_prompt = self._build_prompt(request)
         
-        image_data = self._image_generator.generate_image(
-            prompt=full_prompt,
-            reference_image_path=request.reference_image_path
-        )
+        providers_to_try = []
+        if self._preferred_provider:
+            providers_to_try.append(self._preferred_provider)
+        providers_to_try.extend([p for p in self._backup_providers if p not in providers_to_try])
         
-        if not image_data:
-            raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}")
+        last_error = None
+        for provider_name in providers_to_try:
+            try:
+                self.logger.info(f"Trying image provider: {provider_name}")
+                client = ProviderFactory.get_image_client(provider_name)
+                
+                image_data = client.generate_image(
+                    prompt=full_prompt,
+                    reference_image_path=request.reference_image_path,
+                    style_preset=request.style_preset
+                )
+                
+                if image_data:
+                    self._last_used_provider = provider_name
+                    os.makedirs(self._output_dir, exist_ok=True)
+                    image_path = os.path.join(self._output_dir, f"keyframe_shot_{request.shot_id}.png")
+                    with open(image_path, "wb") as f:
+                        f.write(image_data)
+                    
+                    return KeyframeResult(
+                        shot_id=request.shot_id,
+                        image_path=image_path,
+                        image_data=image_data,
+                        metadata={"provider": provider_name}
+                    )
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = "429" in str(e) or "rate limit" in error_str or "quota" in error_str
+                is_auth_error = "401" in str(e) or "403" in str(e) or "unauthorized" in error_str
+                
+                if is_rate_limit or is_auth_error:
+                    self.logger.warning(f"Provider {provider_name} failed (rate limit/auth): {e}")
+                    last_error = e
+                    continue
+                else:
+                    self.logger.error(f"Provider {provider_name} failed: {e}")
+                    last_error = e
+                    continue
         
-        os.makedirs(self._output_dir, exist_ok=True)
-        image_path = os.path.join(
-            self._output_dir, 
-            f"keyframe_shot_{request.shot_id}.png"
-        )
-        
-        with open(image_path, "wb") as f:
-            f.write(image_data)
-        
-        self.logger.info(f"Saved keyframe: {image_path}")
-        
-        return KeyframeResult(
-            shot_id=request.shot_id,
-            image_path=image_path,
-            image_data=image_data,
-            metadata={
-                "prompt": full_prompt,
-                "reference_image": request.reference_image_path,
-                "style_preset": request.style_preset
-            }
-        )
+        raise RuntimeError(f"All providers failed for shot {request.shot_id}. Last error: {last_error}")
     
     def _build_prompt(self, request: KeyframeRequest) -> str:
         """构建完整的提示词"""
@@ -368,152 +376,81 @@ class VLMScorer(PipelineComponent):
 
 
 class VideoGenerator(PipelineComponent):
-    """
-    图生视频生成器
-    
-    将静态关键帧转换为动态视频片段
-    """
+    """视频生成器 - 支持多厂家熔断切换"""
     
     def __init__(
-        self, 
+        self,
         video_generator: Optional[VideoGeneratorProtocol] = None,
         output_dir: Optional[str] = None,
-        enable_failover: bool = True
+        preferred_provider: Optional[str] = None,
+        backup_providers: Optional[List[str]] = None
     ):
         super().__init__("VideoGenerator")
         self._video_generator = video_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        self._enable_failover = enable_failover
-        self._current_provider = None
+        self._preferred_provider = preferred_provider
+        self._backup_providers = backup_providers or ["google", "replicate"]
+        self._last_used_provider: Optional[str] = None
         
         if self._video_generator is None:
             from integrations.video_client import video_client
             self._video_generator = video_client
     
-    def _create_default_generator(self) -> VideoGeneratorProtocol:
-        """创建默认视频生成器（mock 实现）"""
-        class MockVideoGenerator:
-            def generate_video(
-                self, 
-                image_path: str, 
-                motion_prompt: Optional[str] = None,
-                duration: float = 4.0
-            ) -> Optional[bytes]:
-                logger.debug(f"[MOCK] Generating video from {image_path}")
-                return b"mock_video_data"
-        return MockVideoGenerator()
-    
-    def _generate_with_failover(
-        self,
-        image_path: str,
-        motion_prompt: Optional[str],
-        duration: float
-    ) -> tuple[bytes, str]:
-        """
-        带熔断的视频生成，失败时自动切换 Provider
-        
-        Returns:
-            tuple: (video_bytes, provider_name)
-        """
-        try:
-            primary_client = ProviderFactory.get_video_client()
-            self._current_provider = primary_client.provider_name
-            video_data = primary_client.generate_video(
-                image_path=image_path,
-                motion_prompt=motion_prompt,
-                duration=duration
-            )
-            return video_data, primary_client.provider_name
-        except (QuotaExceededError, AuthenticationError) as e:
-            self.logger.warning(f"Primary provider failed: {e}")
-            
-            if not self._enable_failover:
-                raise
-            
-            backup_providers = ProviderFactory.get_backup_video_providers()
-            for provider_name in backup_providers:
-                try:
-                    self.logger.info(f"Trying backup provider: {provider_name}")
-                    backup_client = ProviderFactory.get_video_client(provider_name)
-                    self._current_provider = backup_client.provider_name
-                    video_data = backup_client.generate_video(
-                        image_path=image_path,
-                        motion_prompt=motion_prompt,
-                        duration=duration
-                    )
-                    self.logger.info(f"Backup provider {provider_name} succeeded")
-                    return video_data, provider_name
-                except (QuotaExceededError, AuthenticationError) as backup_error:
-                    self.logger.warning(f"Backup provider {provider_name} failed: {backup_error}")
-                    continue
-                except NotImplementedError:
-                    self.logger.debug(f"Provider {provider_name} not implemented, skipping")
-                    continue
-            
-            raise RuntimeError("All video providers failed")
+    @property
+    def last_used_provider(self) -> Optional[str]:
+        return self._last_used_provider
     
     def process(self, request: VideoGenRequest) -> VideoGenResult:
-        """
-        生成视频
-        
-        Args:
-            request: 图生视频请求
-            
-        Returns:
-            图生视频结果
-            
-        Raises:
-            FileNotFoundError: 输入图像不存在
-            RuntimeError: 视频生成失败
-        """
+        """图生视频 - 支持熔断降级"""
         self.logger.info(f"Generating video for shot {request.shot_id}")
         
-        if not os.path.exists(request.image_path):
-            raise FileNotFoundError(f"Image not found: {request.image_path}")
+        providers_to_try = []
+        if self._preferred_provider:
+            providers_to_try.append(self._preferred_provider)
+        providers_to_try.extend([p for p in self._backup_providers if p not in providers_to_try])
         
-        motion_prompt = request.motion_prompt
-        if request.camera_movement:
-            motion_prompt = f"{motion_prompt or ''}, {request.camera_movement}".strip(", ")
+        last_error = None
+        for provider_name in providers_to_try:
+            try:
+                self.logger.info(f"Trying video provider: {provider_name}")
+                client = ProviderFactory.get_video_client(provider_name)
+                
+                video_data = client.generate_video(
+                    image_path=request.image_path,
+                    motion_prompt=request.motion_prompt,
+                    camera_movement=request.camera_movement,
+                    duration=request.duration
+                )
+                
+                if video_data:
+                    self._last_used_provider = provider_name
+                    os.makedirs(self._output_dir, exist_ok=True)
+                    video_path = os.path.join(self._output_dir, f"video_shot_{request.shot_id}.mp4")
+                    with open(video_path, "wb") as f:
+                        f.write(video_data)
+                    
+                    return VideoGenResult(
+                        shot_id=request.shot_id,
+                        video_path=video_path,
+                        duration=request.duration,
+                        metadata={"provider": provider_name}
+                    )
+                    
+            except Exception as e:
+                error_str = str(e).lower()
+                is_rate_limit = "429" in str(e) or "rate limit" in error_str or "quota" in error_str
+                is_auth_error = "401" in str(e) or "403" in str(e) or "unauthorized" in error_str
+                
+                if is_rate_limit or is_auth_error:
+                    self.logger.warning(f"Provider {provider_name} failed (rate limit/auth): {e}")
+                    last_error = e
+                    continue
+                else:
+                    self.logger.error(f"Provider {provider_name} failed: {e}")
+                    last_error = e
+                    continue
         
-        if self._enable_failover:
-            video_data, provider_used = self._generate_with_failover(
-                image_path=request.image_path,
-                motion_prompt=motion_prompt,
-                duration=request.duration
-            )
-        else:
-            video_data = self._video_generator.generate_video(
-                image_path=request.image_path,
-                motion_prompt=motion_prompt,
-                duration=request.duration
-            )
-            provider_used = getattr(self._video_generator, 'provider_name', 'unknown')
-        
-        if not video_data:
-            raise RuntimeError(f"Failed to generate video for shot {request.shot_id}")
-        
-        os.makedirs(self._output_dir, exist_ok=True)
-        video_path = os.path.join(
-            self._output_dir, 
-            f"video_shot_{request.shot_id}.mp4"
-        )
-        
-        with open(video_path, "wb") as f:
-            f.write(video_data)
-        
-        self.logger.info(f"Saved video: {video_path}")
-        
-        return VideoGenResult(
-            shot_id=request.shot_id,
-            video_path=video_path,
-            duration=request.duration,
-            metadata={
-                "provider": provider_used,
-                "source_image": request.image_path,
-                "motion_prompt": motion_prompt,
-                "camera_movement": request.camera_movement
-            }
-        )
+        raise RuntimeError(f"All providers failed for shot {request.shot_id}. Last error: {last_error}")
     
     def validate(self, request: VideoGenRequest) -> bool:
         """验证请求"""
@@ -819,8 +756,7 @@ class ShotPipeline:
             audio_path=audio_path,
             dialogue=dialogue,
             start_time=0.0,
-            end_time=final_duration,
-            metadata=video_result.metadata
+            end_time=final_duration
         )
         
         self.logger.info(f"Shot {shot_id} processed successfully: {final_duration:.2f}s")

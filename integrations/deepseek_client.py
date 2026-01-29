@@ -5,9 +5,10 @@ DeepSeek LLM 客户端
 import json
 import logging
 from typing import Optional
-import requests
 
+import requests
 from pydantic import BaseModel
+
 from config import settings
 from integrations.base_client import BaseLLMClient, QuotaExceededError, AuthenticationError
 

@@ -170,11 +170,52 @@ class ProviderFactory:
         cls._video_clients.clear()
         cls._llm_clients.clear()
     
+    # ========== TTS Clients ==========
+    
+    _tts_clients: Dict[str, Any] = {}
+    
+    @classmethod
+    def get_tts_client(cls, provider: Optional[str] = None):
+        """
+        获取 TTS 语音合成客户端
+        
+        Args:
+            provider: openai, doubao, aliyun, minimax, zhipu
+        """
+        provider = provider or settings.TTS_PROVIDER
+        
+        if provider not in cls._tts_clients:
+            cls._tts_clients[provider] = cls._create_tts_client(provider)
+        
+        return cls._tts_clients[provider]
+    
+    @classmethod
+    def _create_tts_client(cls, provider: str):
+        """创建 TTS 客户端实例"""
+        if provider == "openai":
+            from integrations.tts_client import tts_client
+            return tts_client
+        elif provider == "doubao":
+            from integrations.tts_doubao_client import doubao_tts_client
+            return doubao_tts_client
+        elif provider == "aliyun":
+            from integrations.tts_aliyun_client import aliyun_tts_client
+            return aliyun_tts_client
+        elif provider == "minimax":
+            from integrations.tts_minimax_client import minimax_tts_client
+            return minimax_tts_client
+        elif provider == "zhipu":
+            from integrations.tts_zhipu_client import zhipu_tts_client
+            return zhipu_tts_client
+        else:
+            raise ValueError(f"未知的 TTS Provider: {provider}")
+    
     @classmethod
     def list_available_providers(cls) -> Dict[str, List[str]]:
         """列出所有可用的 Provider"""
         return {
             "image": ["google", "aliyun", "replicate"],
             "video": ["google", "replicate", "volcengine", "aliyun"],
-            "llm": ["google", "doubao", "deepseek", "openai"]
+            "llm": ["google", "doubao", "deepseek", "openai"],
+            "tts": ["openai", "doubao", "aliyun", "minimax", "zhipu"]
         }

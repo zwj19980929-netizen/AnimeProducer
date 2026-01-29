@@ -11,14 +11,10 @@ except ImportError:
     raise ImportError("请运行: pip install google-genai")
 
 from config import settings
-from integrations.base_client import BaseVideoClient, QuotaExceededError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
-
-class VideoClient(BaseVideoClient):
-    
-    provider_name: str = "google"
+class VideoClient:
     def __init__(self):
         self.api_key = settings.GOOGLE_API_KEY
         self.model_name = "veo-2.0-generate-001" # 或者 veo-3.0-generate-001
@@ -30,21 +26,8 @@ class VideoClient(BaseVideoClient):
             except Exception as e:
                 logger.error(f"Google Video Client 初始化失败: {e}")
 
-    def generate_video(
-        self,
-        image_path: str,
-        motion_prompt: Optional[str] = None,
-        duration: float = 4.0,
-        **kwargs
-    ) -> bytes:
-        """Generate video from image using Google Veo API."""
-        return self.image_to_video(
-            image_path=image_path,
-            camera_movement=motion_prompt or "static",
-            duration=duration
-        )
-
     def image_to_video(self, image_path: str, camera_movement: str = "static", duration: float = 3.0) -> bytes:
+        # 🟢 调试：如果你在日志里看不到这一行，说明代码没更新！
         logger.info(f"🎬 [VEO API] 准备为图片生成真实视频: {image_path}")
 
         if not self.client:
@@ -56,6 +39,7 @@ class VideoClient(BaseVideoClient):
 
             prompt = f"Anime style animation, {camera_movement} camera motion, high quality."
 
+            # 调用真实的 Google API
             logger.info(f"📡 正在请求 Google Veo (模型: {self.model_name})...")
             response = self.client.models.generate_videos(
                 model=self.model_name,
@@ -76,11 +60,6 @@ class VideoClient(BaseVideoClient):
             raise RuntimeError("Google API 未返回视频数据。")
 
         except Exception as e:
-            error_str = str(e).lower()
-            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise QuotaExceededError(f"Google Video API quota exceeded: {e}")
-            if "401" in error_str or "403" in error_str or "authentication" in error_str:
-                raise AuthenticationError(f"Google Video API authentication failed: {e}")
             logger.error(f"❌ 视频生成 API 调用失败: {e}")
             raise e
 

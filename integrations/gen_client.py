@@ -11,7 +11,7 @@ except ImportError:
     raise ImportError("Please install the Google GenAI SDK: pip install google-genai")
 
 from config import settings
-from integrations.base_client import BaseImageClient, QuotaExceededError, AuthenticationError
+from integrations.base_client import BaseImageClient
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +19,18 @@ logger = logging.getLogger(__name__)
 class GenClient(BaseImageClient):
     """
     Real Image Generation Client using Google GenAI SDK.
-    Strict mode: No mocks.
+    
+    NOTE: Google Imagen API does NOT support reference images for character consistency.
+    When reference_image_path is provided, this client will automatically fallback
+    to AliyunWanxImageClient which supports the ref_img parameter.
     """
     
     provider_name: str = "google"
 
     def __init__(self):
         self.api_key = settings.GOOGLE_API_KEY
-        # 使用之前检测到的可用模型
         self.model_name = "imagen-4.0-generate-001"
+        self._fallback_client = None
 
         if not self.api_key:
             logger.error("GOOGLE_API_KEY is not set. Image generation will fail.")
@@ -38,6 +41,18 @@ class GenClient(BaseImageClient):
             except Exception as e:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
                 self.client = None
+
+    def _get_fallback_client(self) -> Optional["BaseImageClient"]:
+        """延迟加载支持垫图的备用客户端（阿里云万相）"""
+        if self._fallback_client is None:
+            try:
+                from integrations.aliyun_client import aliyun_image_client
+                if aliyun_image_client.health_check():
+                    self._fallback_client = aliyun_image_client
+                    logger.info("Fallback to AliyunWanxImageClient for reference image support")
+            except Exception as e:
+                logger.warning(f"Failed to load Aliyun fallback client: {e}")
+        return self._fallback_client
 
     def generate_image(
         self,
@@ -50,9 +65,36 @@ class GenClient(BaseImageClient):
         Generates a real image using Google's Imagen model.
         
         :param prompt: The main prompt for image generation
-        :param reference_image_path: Optional reference image path (unused currently)
+        :param reference_image_path: Optional reference image path for character consistency.
+                                     If provided, will fallback to Aliyun client since
+                                     Google Imagen does NOT support reference images.
         :param style_preset: Optional global style preset to enforce consistent art style
+        
+        WARNING: Google Imagen API currently does NOT support reference/control images.
+        If reference_image_path is provided, this method will automatically use
+        AliyunWanxImageClient as a fallback which supports ref_img parameter.
         """
+        # ===== Fallback to Aliyun if reference image is provided =====
+        if reference_image_path and os.path.exists(reference_image_path):
+            fallback = self._get_fallback_client()
+            if fallback:
+                logger.warning(
+                    "⚠️ Google Imagen does NOT support reference images. "
+                    "Falling back to AliyunWanxImageClient for character consistency."
+                )
+                return fallback.generate_image(
+                    prompt=prompt,
+                    reference_image_path=reference_image_path,
+                    style_preset=style_preset,
+                    **kwargs
+                )
+            else:
+                logger.error(
+                    "❌ Reference image provided but no fallback client available! "
+                    "Google Imagen will ignore the reference image. "
+                    "Configure ALIYUN_ACCESS_KEY_ID to enable character consistency."
+                )
+        
         if not self.client:
             raise RuntimeError("Google GenAI Client not initialized (Missing API Key).")
 
@@ -112,13 +154,12 @@ class GenClient(BaseImageClient):
                 raise RuntimeError("API returned success but no images found.")
 
         except Exception as e:
-            error_str = str(e).lower()
-            if "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise QuotaExceededError(f"Google API quota exceeded: {e}")
-            if "401" in error_str or "403" in error_str or "authentication" in error_str:
-                raise AuthenticationError(f"Google API authentication failed: {e}")
             logger.error(f"❌ Google Image Generation Failed: {e}")
             raise e
+
+    def health_check(self) -> bool:
+        """Check if Google GenAI client is available"""
+        return self.client is not None
 
 
 # 单例实例

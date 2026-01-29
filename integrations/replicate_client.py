@@ -1,115 +1,95 @@
 """
-Replicate client for PixVerse v4 video generation.
+Replicate API client for PixVerse v4 video generation.
 """
 import logging
-import time
+import os
 from typing import Optional
-import requests
+
+try:
+    import replicate
+except ImportError:
+    replicate = None
 
 from config import settings
-from integrations.base_client import BaseVideoClient, QuotaExceededError, AuthenticationError
+from integrations.base_clients import BaseVideoClient, ProviderType
 
 logger = logging.getLogger(__name__)
 
 
 class ReplicateVideoClient(BaseVideoClient):
-    """Video generation client using Replicate's PixVerse v4."""
+    """Replicate client for PixVerse v4 video generation."""
     
-    provider_name: str = "replicate"
+    provider = ProviderType.REPLICATE
     
     def __init__(self):
-        self.api_token = settings.REPLICATE_API_TOKEN
-        self.base_url = "https://api.replicate.com/v1"
-        self.model_version = "pixverse/pixverse-v4"  # PixVerse v4
+        self.api_token = getattr(settings, 'REPLICATE_API_TOKEN', None) or os.getenv('REPLICATE_API_TOKEN')
+        self.model_id = "pixverse/pixverse-v4"
         
-        if not self.api_token:
-            logger.warning("REPLICATE_API_TOKEN not set")
+        if self.api_token and replicate:
+            os.environ['REPLICATE_API_TOKEN'] = self.api_token
+            logger.info("ReplicateVideoClient initialized")
+        else:
+            logger.warning("ReplicateVideoClient: API token not configured or replicate not installed")
+    
+    def is_available(self) -> bool:
+        """Check if Replicate client is available."""
+        return bool(self.api_token and replicate)
     
     def generate_video(
         self,
         image_path: str,
         motion_prompt: Optional[str] = None,
+        camera_movement: Optional[str] = None,
         duration: float = 4.0,
         **kwargs
     ) -> bytes:
-        """Generate video using PixVerse v4 on Replicate."""
-        if not self.api_token:
-            raise AuthenticationError("REPLICATE_API_TOKEN not configured")
+        """
+        Generate video using PixVerse v4 via Replicate.
         
-        headers = {
-            "Authorization": f"Bearer {self.api_token}",
-            "Content-Type": "application/json"
-        }
+        Args:
+            image_path: Path to the input image
+            motion_prompt: Motion description
+            camera_movement: Camera movement type
+            duration: Target duration in seconds
+            
+        Returns:
+            Video bytes
+        """
+        if not self.is_available():
+            raise RuntimeError("Replicate client not available (missing API token or library)")
         
-        # Read image and encode to base64
-        import base64
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
+        logger.info(f"🎬 [Replicate/PixVerse] Generating video from: {image_path}")
         
-        payload = {
-            "version": self.model_version,
-            "input": {
-                "image": f"data:image/png;base64,{image_b64}",
-                "prompt": motion_prompt or "smooth camera movement",
-                "duration": int(duration)
-            }
-        }
+        prompt = motion_prompt or "Smooth animation"
+        if camera_movement:
+            prompt = f"{prompt}, {camera_movement} camera movement"
         
         try:
-            # Create prediction
-            response = requests.post(
-                f"{self.base_url}/predictions",
-                headers=headers,
-                json=payload,
-                timeout=30
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            
+            output = replicate.run(
+                self.model_id,
+                input={
+                    "image": image_data,
+                    "prompt": prompt,
+                    "duration": min(int(duration), 5),
+                    "quality": "high"
+                }
             )
             
-            if response.status_code == 429:
-                raise QuotaExceededError("Replicate rate limit exceeded")
-            if response.status_code == 401:
-                raise AuthenticationError("Replicate authentication failed")
-            
-            response.raise_for_status()
-            prediction = response.json()
-            prediction_id = prediction["id"]
-            
-            # Poll for completion
-            for _ in range(120):  # Max 2 minutes
-                poll_response = requests.get(
-                    f"{self.base_url}/predictions/{prediction_id}",
-                    headers=headers,
-                    timeout=10
-                )
-                poll_data = poll_response.json()
+            import urllib.request
+            if isinstance(output, str):
+                with urllib.request.urlopen(output) as response:
+                    return response.read()
+            elif hasattr(output, 'read'):
+                return output.read()
+            else:
+                raise RuntimeError(f"Unexpected output type: {type(output)}")
                 
-                if poll_data["status"] == "succeeded":
-                    video_url = poll_data["output"]
-                    video_response = requests.get(video_url, timeout=60)
-                    return video_response.content
-                elif poll_data["status"] == "failed":
-                    raise RuntimeError(f"Replicate prediction failed: {poll_data.get('error')}")
-                
-                time.sleep(1)
-            
-            raise RuntimeError("Replicate prediction timed out")
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Replicate API error: {e}")
+        except Exception as e:
+            logger.error(f"❌ Replicate video generation failed: {e}")
             raise
-    
-    def health_check(self) -> bool:
-        """Check if Replicate API is accessible."""
-        if not self.api_token:
-            return False
-        try:
-            response = requests.get(
-                f"{self.base_url}/models",
-                headers={"Authorization": f"Bearer {self.api_token}"},
-                timeout=5
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
 
 
 replicate_video_client = ReplicateVideoClient()
