@@ -9,12 +9,12 @@ from sqlmodel import Column, Field, SQLModel, JSON
 
 
 def generate_uuid() -> str:
-    """Generate a UUID4 string."""
+    """生成 UUID4 字符串。"""
     return str(uuid4())
 
 
 class ProjectStatus(str, Enum):
-    """Project lifecycle states."""
+    """项目生命周期状态。"""
     DRAFT = "DRAFT"
     ASSETS_READY = "ASSETS_READY"
     STORYBOARD_READY = "STORYBOARD_READY"
@@ -25,7 +25,7 @@ class ProjectStatus(str, Enum):
 
 
 class JobStatus(str, Enum):
-    """Async job states."""
+    """异步任务状态。"""
     PENDING = "PENDING"
     STARTED = "STARTED"
     SUCCESS = "SUCCESS"
@@ -34,7 +34,7 @@ class JobStatus(str, Enum):
 
 
 class JobType(str, Enum):
-    """Types of async jobs."""
+    """异步任务类型。"""
     ASSET_GENERATION = "ASSET_GENERATION"
     STORYBOARD_GENERATION = "STORYBOARD_GENERATION"
     SHOT_RENDER = "SHOT_RENDER"
@@ -43,7 +43,7 @@ class JobType(str, Enum):
 
 
 class ShotRenderStatus(str, Enum):
-    """Individual shot render states."""
+    """镜头渲染状态。"""
     PENDING = "PENDING"
     GENERATING_IMAGE = "GENERATING_IMAGE"
     GENERATING_VIDEO = "GENERATING_VIDEO"
@@ -54,7 +54,7 @@ class ShotRenderStatus(str, Enum):
 
 
 class ChapterStatus(str, Enum):
-    """Chapter processing states."""
+    """章节处理状态。"""
     PENDING = "PENDING"
     EXTRACTING = "EXTRACTING"
     READY = "READY"
@@ -67,7 +67,7 @@ class ChapterStatus(str, Enum):
 
 
 class Project(SQLModel, table=True):
-    """Project metadata and state."""
+    """项目元数据和状态。"""
     __tablename__ = "projects"
 
     id: str = Field(default_factory=generate_uuid, primary_key=True)
@@ -89,7 +89,7 @@ class Project(SQLModel, table=True):
 
 
 class Job(SQLModel, table=True):
-    """Async task record for Celery jobs."""
+    """Celery 异步任务记录。"""
     __tablename__ = "jobs"
 
     id: str = Field(default_factory=generate_uuid, primary_key=True)
@@ -112,7 +112,7 @@ class Job(SQLModel, table=True):
 
 
 class ShotRender(SQLModel, table=True):
-    """Render state and artifacts for each shot."""
+    """镜头渲染状态和产出物。"""
     __tablename__ = "shot_renders"
 
     id: str = Field(default_factory=generate_uuid, primary_key=True)
@@ -142,7 +142,7 @@ class ShotRender(SQLModel, table=True):
 
 
 class Character(SQLModel, table=True):
-    """Character definition with visual and voice references."""
+    """角色定义，包含视觉和语音参考。"""
     __tablename__ = "characters"
 
     character_id: str = Field(primary_key=True)
@@ -159,7 +159,7 @@ class Character(SQLModel, table=True):
 
 
 class CharacterState(SQLModel, table=True):
-    """Character state for tracking visual evolution across chapters."""
+    """角色状态，用于跟踪角色在章节间的视觉演变。"""
     __tablename__ = "character_states"
 
     id: str = Field(default_factory=generate_uuid, primary_key=True)
@@ -178,10 +178,9 @@ class CharacterState(SQLModel, table=True):
 
 
 class Shot(SQLModel, table=True):
-    """Shot definition from storyboard."""
+    """分镜定义。"""
     __tablename__ = "shots"
 
-    # [核心修复] 改为 Optional 并设置 default=None，允许数据库自动生成自增 ID
     shot_id: Optional[int] = Field(default=None, primary_key=True)
 
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
@@ -208,7 +207,7 @@ class Shot(SQLModel, table=True):
 
 
 class Chapter(SQLModel, table=True):
-    """Chapter for multi-chapter novel support."""
+    """章节，支持多章节小说。"""
     __tablename__ = "chapters"
 
     chapter_id: str = Field(default_factory=generate_uuid, primary_key=True)

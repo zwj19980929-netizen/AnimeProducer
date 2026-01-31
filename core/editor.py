@@ -1,11 +1,4 @@
-"""
-Editor - 视频编辑与合成模块
-
-职责：
-- 镜头拼接与转场
-- 音视频对齐（slow-motion / loop 策略）
-- 字幕生成与嵌入
-"""
+"""Editor - 视频编辑与合成模块"""
 import logging
 import os
 from dataclasses import dataclass
@@ -26,30 +19,30 @@ logger = logging.getLogger(__name__)
 
 
 class AlignmentStrategy(str, Enum):
-    """时长对齐策略"""
+    """时长对齐策略。"""
     SLOW_MOTION = "slow_motion"
     LOOP = "loop"
 
 
 @dataclass
 class ShotArtifact:
-    """单个镜头的产出物"""
+    """单个镜头的产出物。"""
     shot_id: int
     video_path: str
     audio_path: Optional[str] = None
     dialogue: Optional[str] = None
     start_time: float = 0.0
     end_time: float = 0.0
-    
+
     @property
     def duration(self) -> float:
-        """计算镜头时长"""
+        """计算镜头时长。"""
         return self.end_time - self.start_time
 
 
 @dataclass
 class SubtitleEntry:
-    """字幕条目"""
+    """字幕条目。"""
     start_time: float
     end_time: float
     text: str
@@ -59,35 +52,26 @@ def generate_srt(
     entries: List[SubtitleEntry],
     output_path: str
 ) -> str:
-    """
-    生成 SRT 字幕文件
-    
-    Args:
-        entries: 字幕条目列表
-        output_path: 输出文件路径
-        
-    Returns:
-        生成的 SRT 文件路径
-    """
+    """生成 SRT 字幕文件。"""
     def format_time(seconds: float) -> str:
-        """将秒数转换为 SRT 时间格式 HH:MM:SS,mmm"""
+        """将秒数转换为 SRT 时间格式。"""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
         millis = int((seconds % 1) * 1000)
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
-    
+
     lines: List[str] = []
     for idx, entry in enumerate(entries, start=1):
         lines.append(str(idx))
         lines.append(f"{format_time(entry.start_time)} --> {format_time(entry.end_time)}")
         lines.append(entry.text)
         lines.append("")
-    
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
-    
+
     logger.info(f"Generated SRT file: {output_path} with {len(entries)} entries")
     return output_path
 
@@ -97,22 +81,12 @@ def _align_video_to_audio(
     audio_duration: float,
     strategy: AlignmentStrategy
 ) -> VideoFileClip:
-    """
-    对齐视频时长到音频时长
-    
-    Args:
-        video_clip: 视频片段
-        audio_duration: 目标音频时长
-        strategy: 对齐策略
-        
-    Returns:
-        对齐后的视频片段
-    """
+    """对齐视频时长到音频时长。"""
     video_duration = video_clip.duration
-    
+
     if abs(video_duration - audio_duration) < 0.1:
         return video_clip
-    
+
     if video_duration < audio_duration:
         if strategy == AlignmentStrategy.SLOW_MOTION:
             speed_factor = video_duration / audio_duration
@@ -133,19 +107,7 @@ def assemble_shots(
     crossfade_duration: float = 0.5,
     fps: int = 24
 ) -> str:
-    """
-    逐镜头拼接视频
-
-    Args:
-        shots: 镜头产出物列表
-        output_path: 输出视频路径
-        alignment_strategy: 时长对齐策略
-        crossfade_duration: 转场时长（秒）
-        fps: 输出帧率
-
-    Returns:
-        生成的视频文件路径
-    """
+    """逐镜头拼接视频。"""
     if not shots:
         raise ValueError("No shots provided for assembly")
 
@@ -214,7 +176,6 @@ def assemble_shots(
         return output_path
 
     finally:
-        # 确保所有 clip 都被关闭，即使发生异常
         for clip in clips:
             try:
                 clip.close()
@@ -231,19 +192,10 @@ def generate_srt_from_shots(
     shots: List[ShotArtifact],
     output_path: str
 ) -> str:
-    """
-    从镜头列表生成 SRT 字幕文件
-    
-    Args:
-        shots: 镜头产出物列表（需包含 dialogue 和时间信息）
-        output_path: 输出 SRT 文件路径
-        
-    Returns:
-        生成的 SRT 文件路径
-    """
+    """从镜头列表生成 SRT 字幕文件。"""
     entries: List[SubtitleEntry] = []
     current_time = 0.0
-    
+
     for shot in shots:
         if shot.dialogue:
             duration = shot.duration if shot.duration > 0 else 3.0
@@ -261,7 +213,7 @@ def generate_srt_from_shots(
                 current_time += shot.duration if shot.duration > 0 else 3.0
         else:
             current_time += shot.duration if shot.duration > 0 else 3.0
-    
+
     return generate_srt(entries, output_path)
 
 
@@ -275,31 +227,16 @@ def add_subtitles(
     stroke_color: str = "black",
     stroke_width: int = 2
 ) -> str:
-    """
-    将 SRT 字幕嵌入视频
-    
-    Args:
-        video_path: 输入视频路径
-        srt_path: SRT 字幕文件路径
-        output_path: 输出视频路径
-        font: 字体名称
-        font_size: 字体大小
-        font_color: 字体颜色
-        stroke_color: 描边颜色
-        stroke_width: 描边宽度
-        
-    Returns:
-        生成的视频文件路径
-    """
+    """将 SRT 字幕嵌入视频。"""
     logger.info(f"Adding subtitles to video: {video_path}")
-    
+
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video file not found: {video_path}")
     if not os.path.exists(srt_path):
         raise FileNotFoundError(f"SRT file not found: {srt_path}")
-    
+
     video = VideoFileClip(video_path)
-    
+
     def make_text_clip(txt: str) -> TextClip:
         return TextClip(
             text=txt,
@@ -311,14 +248,14 @@ def add_subtitles(
             method="caption",
             size=(video.w * 0.9, None)
         )
-    
+
     subtitles = SubtitlesClip(srt_path, make_text_clip)
     subtitles = subtitles.with_position(("center", 0.85), relative=True)
-    
+
     final = CompositeVideoClip([video, subtitles])
-    
+
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    
+
     final.write_videofile(
         output_path,
         fps=video.fps or 24,
@@ -326,10 +263,10 @@ def add_subtitles(
         audio_codec="aac",
         logger=None
     )
-    
+
     video.close()
     final.close()
-    
+
     logger.info(f"Successfully added subtitles: {output_path}")
     return output_path
 
@@ -340,18 +277,7 @@ def assemble_video(
     output_path: str,
     alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP
 ) -> str:
-    """
-    拼接视频并与音频对齐（兼容旧接口）
-
-    Args:
-        video_paths: 视频文件路径列表
-        audio_path: 音频文件路径
-        output_path: 输出视频路径
-        alignment_strategy: 对齐策略
-
-    Returns:
-        生成的视频文件路径
-    """
+    """拼接视频并与音频对齐（兼容旧接口）。"""
     logger.info(f"Assembling {len(video_paths)} videos with audio: {audio_path}")
 
     clips: List[VideoFileClip] = []
@@ -386,7 +312,6 @@ def assemble_video(
         logger.error(f"Error assembling video: {e}")
         raise
     finally:
-        # 确保所有资源都被关闭
         for clip in clips:
             try:
                 clip.close()

@@ -1,24 +1,38 @@
 import logging
 import traceback
+import os
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from sqlmodel import Session
 
 from core.database import engine
-from core.models import Shot, ShotRender, ShotRenderStatus
+from core.models import Shot, ShotRender, ShotRenderStatus, Character
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
 from tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-# 初始化全局流水线实例
-# 这就是为什么代码可以变短：繁重的逻辑都封装在 ShotPipeline (core/pipeline.py) 里了
 pipeline = ShotPipeline(
-    enable_vlm_scoring=True,  # 开启 VLM 评分
-    min_vlm_score=0.6  # 设置最低分要求
+    enable_vlm_scoring=True,
+    min_vlm_score=0.6
 )
+
+
+def get_reference_image_for_shot(shot: Shot, session: Session) -> Optional[str]:
+    """获取镜头中角色的参考图片路径。"""
+    if not shot.characters_in_shot:
+        return None
+
+    first_character_id = shot.characters_in_shot[0]
+    character = session.get(Character, first_character_id)
+
+    if character and character.reference_image_path:
+        if os.path.exists(character.reference_image_path):
+            return character.reference_image_path
+
+    return None
 
 
 def update_render_status(
@@ -28,7 +42,7 @@ def update_render_status(
         result_paths: Dict[str, str] = None,
         error: str = None
 ):
-    """更新数据库中的渲染状态"""
+    """更新数据库中的渲染状态。"""
     try:
         with Session(engine) as session:
             render = session.get(ShotRender, render_id)
@@ -36,9 +50,12 @@ def update_render_status(
                 render.status = status
                 render.progress = progress
                 if result_paths:
-                    if "video" in result_paths: render.video_path = result_paths["video"]
-                    if "audio" in result_paths: render.audio_path = result_paths["audio"]
-                    if "image" in result_paths: render.image_path = result_paths["image"]
+                    if "video" in result_paths:
+                        render.video_path = result_paths["video"]
+                    if "audio" in result_paths:
+                        render.audio_path = result_paths["audio"]
+                    if "image" in result_paths:
+                        render.image_path = result_paths["image"]
                 if error:
                     render.error_message = error
                 render.updated_at = datetime.utcnow()
@@ -50,21 +67,16 @@ def update_render_status(
 
 @celery_app.task(bind=True, name="tasks.shots.render_shot")
 def render_shot(self, shot_id: int):
-    """
-    执行真正的镜头渲染流水线
-    逻辑委托给 core.pipeline.ShotPipeline
-    """
-    logger.info(f"🚀 Starting full pipeline for shot: {shot_id}")
+    """执行镜头渲染流水线。"""
+    logger.info(f"Starting full pipeline for shot: {shot_id}")
     start_time = datetime.utcnow()
 
-    # 获取 Shot 信息，在 session 内提取所有需要的属性
     with Session(engine) as session:
         shot = session.get(Shot, shot_id)
         if not shot:
             logger.error(f"Shot {shot_id} not found!")
             return {"status": "failed", "error": "Shot not found"}
 
-        # 提取所有需要的属性
         shot_data = {
             "shot_id": shot.shot_id,
             "visual_prompt": shot.visual_prompt,
@@ -74,7 +86,8 @@ def render_shot(self, shot_id: int):
             "project_id": shot.project_id,
         }
 
-        # 获取关联的 Render 记录 ID
+        reference_image_path = get_reference_image_for_shot(shot, session)
+
         render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
         render_id = render_record.id if render_record else None
 
@@ -82,21 +95,19 @@ def render_shot(self, shot_id: int):
         update_render_status(render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1)
 
     try:
-        # 调用核心流水线 (Core Pipeline)
-        # 这里会真正调用 Google Imagen, VLM, TTS 等模型
         logger.info(f"Processing shot {shot_id} via ShotPipeline...")
 
         artifact = pipeline.process_shot(
             shot_id=shot_data["shot_id"],
             visual_prompt=shot_data["visual_prompt"],
             dialogue=shot_data["dialogue"],
+            reference_image_path=reference_image_path,
             camera_movement=shot_data["camera_movement"],
-            voice_id="alloy",  # 默认声音，后续可从 Character 表获取
+            voice_id="alloy",
             target_duration=shot_data["duration"],
             alignment_strategy=AlignmentStrategy.LOOP
         )
 
-        # 记录结果
         result_paths = {
             "video": artifact.video_path,
             "audio": artifact.audio_path
@@ -106,9 +117,8 @@ def render_shot(self, shot_id: int):
             update_render_status(render_id, ShotRenderStatus.SUCCESS, 1.0, result_paths)
 
         duration = (datetime.utcnow() - start_time).total_seconds()
-        logger.info(f"✅ Shot {shot_id} finished in {duration:.2f}s. Video: {artifact.video_path}")
+        logger.info(f"Shot {shot_id} finished in {duration:.2f}s. Video: {artifact.video_path}")
 
-        # 返回结果给下一个任务
         return {
             "shot_id": shot_id,
             "status": "completed",

@@ -1,13 +1,3 @@
-"""
-Director - 影视工业制片调度系统
-
-职责：
-- 项目创建与管理
-- 小说导入与解析
-- 资产构建（角色提取 + 参考图生成）
-- 分镜生成
-- 渲染任务调度
-"""
 import logging
 from datetime import datetime
 from typing import List, Optional, Dict
@@ -21,7 +11,6 @@ from core.models import (
     Shot, ShotRender, ShotRenderStatus,
     Character
 )
-# 移除 core.database 的 engine 导入，因为我们不再自己创建连接
 from core.script_parser import script_parser
 from core.asset_manager import asset_manager
 from config import settings
@@ -125,7 +114,6 @@ class Director:
                 f"Project {project_id} has no script content."
             )
 
-        # 清除旧分镜
         existing_shots = self.session.exec(
             select(Shot).where(Shot.project_id == project_id)
         ).all()
@@ -134,7 +122,7 @@ class Director:
             logger.info(f"Clearing {len(existing_shots)} existing shots for rebuild.")
             for shot in existing_shots:
                 self.session.delete(shot)
-            self.session.commit()  # 确保删除操作生效
+            self.session.commit()
 
         raw_shots = script_parser.parse_novel_to_storyboard(project.script_content)
 
@@ -190,7 +178,6 @@ class Director:
         self.session.commit()
         self.session.refresh(job)
 
-        # 创建 Render 记录
         for shot in shots:
             existing_render = self.session.exec(
                 select(ShotRender).where(

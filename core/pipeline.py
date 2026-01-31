@@ -1,15 +1,4 @@
-"""
-Pipeline - 视觉流水线组件
-
-职责：
-- KeyframeGenerator: 关键帧生成（注入 reference image）
-- VLMScorer: VLM 评分（可选）
-- VideoGenerator: 图生视频
-- AudioGenerator: TTS 生成
-- ShotAligner: 音视频对齐
-
-每个组件都是可独立测试的类
-"""
+"""Pipeline - 视觉流水线组件"""
 
 import logging
 import os
@@ -24,7 +13,9 @@ from core.editor import AlignmentStrategy, ShotArtifact
 
 
 def sanitize_filename(name: Any) -> str:
+    """清理文件名中的非法字符。"""
     return re.sub(r'[^\w\-_.]', '_', str(name))
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class KeyframeRequest:
-    """关键帧生成请求"""
+    """关键帧生成请求。"""
     shot_id: int
     prompt: str
     reference_image_path: Optional[str] = None
@@ -50,7 +41,7 @@ class KeyframeRequest:
 
 @dataclass
 class KeyframeResult:
-    """关键帧生成结果"""
+    """关键帧生成结果。"""
     shot_id: int
     image_path: str
     image_data: Optional[bytes] = None
@@ -578,77 +569,89 @@ class ShotAligner(PipelineComponent):
     def process(self, request: AlignmentRequest) -> AlignmentResult:
         """
         对齐音视频
-        
+
         Args:
             request: 音视频对齐请求
-            
+
         Returns:
             音视频对齐结果
-            
+
         Raises:
             FileNotFoundError: 输入文件不存在
         """
         from moviepy import VideoFileClip, AudioFileClip
         from moviepy.video.fx import Loop
-        
+
         self.logger.info(f"Aligning shot {request.shot_id}")
-        
+
         if not os.path.exists(request.video_path):
             raise FileNotFoundError(f"Video not found: {request.video_path}")
         if not os.path.exists(request.audio_path):
             raise FileNotFoundError(f"Audio not found: {request.audio_path}")
-        
-        video = VideoFileClip(request.video_path)
-        audio = AudioFileClip(request.audio_path)
-        
-        video_duration = video.duration
-        audio_duration = audio.duration
-        
-        self.logger.debug(
-            f"Video: {video_duration:.2f}s, Audio: {audio_duration:.2f}s, "
-            f"Strategy: {request.strategy.value}"
-        )
-        
-        if video_duration < audio_duration:
-            if request.strategy == AlignmentStrategy.SLOW_MOTION:
-                speed_factor = video_duration / audio_duration
-                video = video.with_speed_scaled(speed_factor)
-                self.logger.debug(f"Applied slow-motion: {speed_factor:.2f}x")
-            else:
-                video = video.with_effects([Loop(duration=audio_duration)])
-                self.logger.debug(f"Applied loop to {audio_duration:.2f}s")
-        elif video_duration > audio_duration:
-            video = video.subclipped(0, audio_duration)
-            self.logger.debug(f"Trimmed video to {audio_duration:.2f}s")
-        
-        video = video.with_audio(audio)
-        final_duration = video.duration
-        
-        os.makedirs(self._output_dir, exist_ok=True)
-        output_path = os.path.join(
-            self._output_dir, 
-            f"aligned_shot_{request.shot_id}.mp4"
-        )
-        
-        video.write_videofile(
-            output_path, 
-            fps=24, 
-            codec="libx264",
-            audio_codec="aac",
-            logger=None
-        )
-        
-        video.close()
-        audio.close()
-        
-        self.logger.info(f"Aligned shot saved: {output_path} ({final_duration:.2f}s)")
-        
-        return AlignmentResult(
-            shot_id=request.shot_id,
-            output_path=output_path,
-            final_duration=final_duration,
-            strategy_used=request.strategy
-        )
+
+        video = None
+        audio = None
+
+        try:
+            video = VideoFileClip(request.video_path)
+            audio = AudioFileClip(request.audio_path)
+
+            video_duration = video.duration
+            audio_duration = audio.duration
+
+            self.logger.debug(
+                f"Video: {video_duration:.2f}s, Audio: {audio_duration:.2f}s, "
+                f"Strategy: {request.strategy.value}"
+            )
+
+            if video_duration < audio_duration:
+                if request.strategy == AlignmentStrategy.SLOW_MOTION:
+                    speed_factor = video_duration / audio_duration
+                    video = video.with_speed_scaled(speed_factor)
+                    self.logger.debug(f"Applied slow-motion: {speed_factor:.2f}x")
+                else:
+                    video = video.with_effects([Loop(duration=audio_duration)])
+                    self.logger.debug(f"Applied loop to {audio_duration:.2f}s")
+            elif video_duration > audio_duration:
+                video = video.subclipped(0, audio_duration)
+                self.logger.debug(f"Trimmed video to {audio_duration:.2f}s")
+
+            video = video.with_audio(audio)
+            final_duration = video.duration
+
+            os.makedirs(self._output_dir, exist_ok=True)
+            output_path = os.path.join(
+                self._output_dir,
+                f"aligned_shot_{request.shot_id}.mp4"
+            )
+
+            video.write_videofile(
+                output_path,
+                fps=24,
+                codec="libx264",
+                audio_codec="aac",
+                logger=None
+            )
+
+            self.logger.info(f"Aligned shot saved: {output_path} ({final_duration:.2f}s)")
+
+            return AlignmentResult(
+                shot_id=request.shot_id,
+                output_path=output_path,
+                final_duration=final_duration,
+                strategy_used=request.strategy
+            )
+        finally:
+            if video:
+                try:
+                    video.close()
+                except Exception:
+                    pass
+            if audio:
+                try:
+                    audio.close()
+                except Exception:
+                    pass
     
     def validate(self, request: AlignmentRequest) -> bool:
         """验证请求"""

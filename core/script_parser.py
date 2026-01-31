@@ -1,19 +1,22 @@
+import logging
 from typing import List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from core.models import Shot
 from integrations.llm_client import llm_client
 
+logger = logging.getLogger(__name__)
+
+
 class Storyboard(BaseModel):
     shots: List[Shot]
+
 
 class ScriptParser:
     def __init__(self):
         self.llm = llm_client
 
     def parse_novel_to_storyboard(self, novel_text: str) -> List[Shot]:
-        """
-        Parses a segment of novel text into a list of Shot objects (Storyboard).
-        """
+        """将小说文本解析为分镜列表"""
         prompt = f"""
         You are a professional movie director and storyboard artist.
         Convert the following novel text into a detailed storyboard (list of shots).
@@ -34,7 +37,8 @@ class ScriptParser:
             storyboard = self.llm.generate_structured_output(prompt, Storyboard)
             return storyboard.shots
         except Exception as e:
-            print(f"Failed to parse script: {e}")
+            logger.error(f"Failed to parse script: {e}")
             return []
+
 
 script_parser = ScriptParser()
