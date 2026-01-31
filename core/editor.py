@@ -135,89 +135,96 @@ def assemble_shots(
 ) -> str:
     """
     逐镜头拼接视频
-    
+
     Args:
         shots: 镜头产出物列表
         output_path: 输出视频路径
         alignment_strategy: 时长对齐策略
         crossfade_duration: 转场时长（秒）
         fps: 输出帧率
-        
+
     Returns:
         生成的视频文件路径
     """
     if not shots:
         raise ValueError("No shots provided for assembly")
-    
-    logger.info(f"Assembling {len(shots)} shots with {alignment_strategy.value} strategy")
-    
-    clips: List[VideoFileClip] = []
-    
-    audio_clips_to_close: list = []
 
-    for i, shot in enumerate(shots):
-        logger.debug(f"Processing shot {shot.shot_id}: {shot.video_path}")
-        
-        try:
-            video_clip = VideoFileClip(shot.video_path)
-        except Exception as e:
-            logger.error(f"Failed to load video for shot {shot.shot_id}: {e}")
-            for clip in clips:
-                clip.close()
-            for ac in audio_clips_to_close:
-                ac.close()
-            raise
-        
-        if shot.audio_path and os.path.exists(shot.audio_path):
+    logger.info(f"Assembling {len(shots)} shots with {alignment_strategy.value} strategy")
+
+    clips: List[VideoFileClip] = []
+
+    try:
+        for i, shot in enumerate(shots):
+            logger.debug(f"Processing shot {shot.shot_id}: {shot.video_path}")
+
             try:
-                audio_clip = AudioFileClip(shot.audio_path)
-                audio_clips_to_close.append(audio_clip)
-                video_clip = _align_video_to_audio(
-                    video_clip, 
-                    audio_clip.duration, 
-                    alignment_strategy
-                )
-                video_clip = video_clip.with_audio(audio_clip)
-                logger.debug(f"Shot {shot.shot_id}: aligned to audio duration {audio_clip.duration:.2f}s")
+                video_clip = VideoFileClip(shot.video_path)
             except Exception as e:
-                logger.warning(f"Failed to load audio for shot {shot.shot_id}: {e}")
-        
-        if crossfade_duration > 0 and len(shots) > 1:
-            if i > 0:
-                video_clip = video_clip.with_effects([CrossFadeIn(crossfade_duration)])
-            if i < len(shots) - 1:
-                video_clip = video_clip.with_effects([CrossFadeOut(crossfade_duration)])
-        
-        clips.append(video_clip)
-    
-    if crossfade_duration > 0 and len(clips) > 1:
-        final_clip = concatenate_videoclips(
-            clips, 
-            method="compose",
-            padding=-crossfade_duration
+                logger.error(f"Failed to load video for shot {shot.shot_id}: {e}")
+                raise
+
+            if shot.audio_path and os.path.exists(shot.audio_path):
+                audio_clip = None
+                try:
+                    audio_clip = AudioFileClip(shot.audio_path)
+                    video_clip = _align_video_to_audio(
+                        video_clip,
+                        audio_clip.duration,
+                        alignment_strategy
+                    )
+                    video_clip = video_clip.with_audio(audio_clip)
+                    logger.debug(f"Shot {shot.shot_id}: aligned to audio duration {audio_clip.duration:.2f}s")
+                except Exception as e:
+                    logger.warning(f"Failed to load audio for shot {shot.shot_id}: {e}")
+                    if audio_clip:
+                        try:
+                            audio_clip.close()
+                        except Exception:
+                            pass
+
+            if crossfade_duration > 0 and len(shots) > 1:
+                if i > 0:
+                    video_clip = video_clip.with_effects([CrossFadeIn(crossfade_duration)])
+                if i < len(shots) - 1:
+                    video_clip = video_clip.with_effects([CrossFadeOut(crossfade_duration)])
+
+            clips.append(video_clip)
+
+        if crossfade_duration > 0 and len(clips) > 1:
+            final_clip = concatenate_videoclips(
+                clips,
+                method="compose",
+                padding=-crossfade_duration
+            )
+        else:
+            final_clip = concatenate_videoclips(clips, method="compose")
+
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        logger.info(f"Writing final video: {output_path} (duration: {final_clip.duration:.2f}s)")
+        final_clip.write_videofile(
+            output_path,
+            fps=fps,
+            codec="libx264",
+            audio_codec="aac",
+            logger=None
         )
-    else:
-        final_clip = concatenate_videoclips(clips, method="compose")
-    
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    
-    logger.info(f"Writing final video: {output_path} (duration: {final_clip.duration:.2f}s)")
-    final_clip.write_videofile(
-        output_path, 
-        fps=fps, 
-        codec="libx264",
-        audio_codec="aac",
-        logger=None
-    )
-    
-    for clip in clips:
-        clip.close()
-    for ac in audio_clips_to_close:
-        ac.close()
-    final_clip.close()
-    
-    logger.info(f"Successfully assembled video: {output_path}")
-    return output_path
+
+        logger.info(f"Successfully assembled video: {output_path}")
+        return output_path
+
+    finally:
+        # 确保所有 clip 都被关闭，即使发生异常
+        for clip in clips:
+            try:
+                clip.close()
+            except Exception:
+                pass
+        if 'final_clip' in locals():
+            try:
+                final_clip.close()
+            except Exception:
+                pass
 
 
 def generate_srt_from_shots(
@@ -291,70 +298,66 @@ def add_subtitles(
     if not os.path.exists(srt_path):
         raise FileNotFoundError(f"SRT file not found: {srt_path}")
     
-    video = None
-    final = None
-    try:
-        video = VideoFileClip(video_path)
-        
-        def make_text_clip(txt: str) -> TextClip:
-            return TextClip(
-                text=txt,
-                font=font,
-                font_size=font_size,
-                color=font_color,
-                stroke_color=stroke_color,
-                stroke_width=stroke_width,
-                method="caption",
-                size=(video.w * 0.9, None)
-            )
-        
-        subtitles = SubtitlesClip(srt_path, make_text_clip)
-        subtitles = subtitles.with_position(("center", 0.85), relative=True)
-        
-        final = CompositeVideoClip([video, subtitles])
-        
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        
-        final.write_videofile(
-            output_path,
-            fps=video.fps or 24,
-            codec="libx264",
-            audio_codec="aac",
-            logger=None
+    video = VideoFileClip(video_path)
+    
+    def make_text_clip(txt: str) -> TextClip:
+        return TextClip(
+            text=txt,
+            font=font,
+            font_size=font_size,
+            color=font_color,
+            stroke_color=stroke_color,
+            stroke_width=stroke_width,
+            method="caption",
+            size=(video.w * 0.9, None)
         )
-        
-        logger.info(f"Successfully added subtitles: {output_path}")
-        return output_path
-    finally:
-        if final:
-            final.close()
-        if video:
-            video.close()
+    
+    subtitles = SubtitlesClip(srt_path, make_text_clip)
+    subtitles = subtitles.with_position(("center", 0.85), relative=True)
+    
+    final = CompositeVideoClip([video, subtitles])
+    
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    
+    final.write_videofile(
+        output_path,
+        fps=video.fps or 24,
+        codec="libx264",
+        audio_codec="aac",
+        logger=None
+    )
+    
+    video.close()
+    final.close()
+    
+    logger.info(f"Successfully added subtitles: {output_path}")
+    return output_path
 
 
 def assemble_video(
-    video_paths: List[str], 
-    audio_path: str, 
+    video_paths: List[str],
+    audio_path: str,
     output_path: str,
     alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP
 ) -> str:
     """
     拼接视频并与音频对齐（兼容旧接口）
-    
+
     Args:
         video_paths: 视频文件路径列表
         audio_path: 音频文件路径
         output_path: 输出视频路径
         alignment_strategy: 对齐策略
-        
+
     Returns:
         生成的视频文件路径
     """
     logger.info(f"Assembling {len(video_paths)} videos with audio: {audio_path}")
-    
-    clips = []
+
+    clips: List[VideoFileClip] = []
     audio_clip = None
     final_video_clip = None
+
     try:
         clips = [VideoFileClip(p) for p in video_paths]
         final_video_clip = concatenate_videoclips(clips)
@@ -366,8 +369,8 @@ def assemble_video(
         logger.debug(f"Video Duration: {video_duration}s, Audio Duration: {audio_duration}s")
 
         final_video_clip = _align_video_to_audio(
-            final_video_clip, 
-            audio_duration, 
+            final_video_clip,
+            audio_duration,
             alignment_strategy
         )
 
@@ -375,7 +378,7 @@ def assemble_video(
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         final_video_clip.write_videofile(output_path, fps=24, logger=None)
-        
+
         logger.info(f"Successfully created: {output_path}")
         return output_path
 
@@ -383,9 +386,19 @@ def assemble_video(
         logger.error(f"Error assembling video: {e}")
         raise
     finally:
+        # 确保所有资源都被关闭
         for clip in clips:
-            clip.close()
+            try:
+                clip.close()
+            except Exception:
+                pass
         if final_video_clip:
-            final_video_clip.close()
+            try:
+                final_video_clip.close()
+            except Exception:
+                pass
         if audio_clip:
-            audio_clip.close()
+            try:
+                audio_clip.close()
+            except Exception:
+                pass

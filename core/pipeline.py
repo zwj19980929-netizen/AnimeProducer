@@ -10,8 +10,10 @@ Pipeline - 视觉流水线组件
 
 每个组件都是可独立测试的类
 """
+
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,8 +21,10 @@ from typing import Any, Dict, List, Optional, Protocol, TypeVar
 
 from config import settings
 from core.editor import AlignmentStrategy, ShotArtifact
-from integrations.provider_factory import ProviderFactory
-from integrations.base_clients import ProviderType
+
+
+def sanitize_filename(name: Any) -> str:
+    return re.sub(r'[^\w\-_.]', '_', str(name))
 
 logger = logging.getLogger(__name__)
 
@@ -201,83 +205,75 @@ class PipelineComponent(ABC):
 
 
 class KeyframeGenerator(PipelineComponent):
-    """关键帧生成器 - 支持多厂家熔断切换"""
+    """
+    关键帧生成器
+    
+    使用图像生成模型创建关键帧，支持注入参考图像以保持角色一致性
+    """
     
     def __init__(
         self, 
         image_generator: Optional[ImageGeneratorProtocol] = None,
-        output_dir: Optional[str] = None,
-        preferred_provider: Optional[str] = None,
-        backup_providers: Optional[List[str]] = None
+        output_dir: Optional[str] = None
     ):
         super().__init__("KeyframeGenerator")
         self._image_generator = image_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        self._preferred_provider = preferred_provider
-        self._backup_providers = backup_providers or ["google", "replicate"]
-        self._last_used_provider: Optional[str] = None
         
         if self._image_generator is None:
             from integrations.gen_client import gen_client
             self._image_generator = gen_client
     
-    @property
-    def last_used_provider(self) -> Optional[str]:
-        """返回最后使用的厂家名称，用于记账"""
-        return self._last_used_provider
-    
     def process(self, request: KeyframeRequest) -> KeyframeResult:
-        """生成关键帧 - 支持熔断降级"""
+        """
+        生成关键帧
+        
+        Args:
+            request: 关键帧生成请求
+            
+        Returns:
+            关键帧生成结果
+            
+        Raises:
+            RuntimeError: 图像生成失败
+        """
         self.logger.info(f"Generating keyframe for shot {request.shot_id}")
+        self.logger.debug(f"Prompt: {request.prompt[:100]}...")
+        
+        if request.reference_image_path:
+            self.logger.debug(f"Using reference image: {request.reference_image_path}")
         
         full_prompt = self._build_prompt(request)
         
-        providers_to_try = []
-        if self._preferred_provider:
-            providers_to_try.append(self._preferred_provider)
-        providers_to_try.extend([p for p in self._backup_providers if p not in providers_to_try])
+        image_data = self._image_generator.generate_image(
+            prompt=full_prompt,
+            reference_image_path=request.reference_image_path
+        )
         
-        last_error = None
-        for provider_name in providers_to_try:
-            try:
-                self.logger.info(f"Trying image provider: {provider_name}")
-                client = ProviderFactory.get_image_client(provider_name)
-                
-                image_data = client.generate_image(
-                    prompt=full_prompt,
-                    reference_image_path=request.reference_image_path,
-                    style_preset=request.style_preset
-                )
-                
-                if image_data:
-                    self._last_used_provider = provider_name
-                    os.makedirs(self._output_dir, exist_ok=True)
-                    image_path = os.path.join(self._output_dir, f"keyframe_shot_{request.shot_id}.png")
-                    with open(image_path, "wb") as f:
-                        f.write(image_data)
-                    
-                    return KeyframeResult(
-                        shot_id=request.shot_id,
-                        image_path=image_path,
-                        image_data=image_data,
-                        metadata={"provider": provider_name}
-                    )
-                    
-            except Exception as e:
-                error_str = str(e).lower()
-                is_rate_limit = "429" in str(e) or "rate limit" in error_str or "quota" in error_str
-                is_auth_error = "401" in str(e) or "403" in str(e) or "unauthorized" in error_str
-                
-                if is_rate_limit or is_auth_error:
-                    self.logger.warning(f"Provider {provider_name} failed (rate limit/auth): {e}")
-                    last_error = e
-                    continue
-                else:
-                    self.logger.error(f"Provider {provider_name} failed: {e}")
-                    last_error = e
-                    continue
+        if not image_data:
+            raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}")
         
-        raise RuntimeError(f"All providers failed for shot {request.shot_id}. Last error: {last_error}")
+        os.makedirs(self._output_dir, exist_ok=True)
+        image_path = os.path.join(
+            self._output_dir,
+            f"keyframe_shot_{sanitize_filename(request.shot_id)}.png"
+        )
+        
+        with open(image_path, "wb") as f:
+            f.write(image_data)
+        
+        self.logger.info(f"Saved keyframe: {image_path}")
+        
+        return KeyframeResult(
+            shot_id=request.shot_id,
+            image_path=image_path,
+            image_data=image_data,
+            metadata={
+                "prompt": full_prompt,
+                "reference_image": request.reference_image_path,
+                "style_preset": request.style_preset
+            }
+        )
     
     def _build_prompt(self, request: KeyframeRequest) -> str:
         """构建完整的提示词"""
@@ -376,81 +372,90 @@ class VLMScorer(PipelineComponent):
 
 
 class VideoGenerator(PipelineComponent):
-    """视频生成器 - 支持多厂家熔断切换"""
+    """
+    图生视频生成器
+    
+    将静态关键帧转换为动态视频片段
+    """
     
     def __init__(
-        self,
+        self, 
         video_generator: Optional[VideoGeneratorProtocol] = None,
-        output_dir: Optional[str] = None,
-        preferred_provider: Optional[str] = None,
-        backup_providers: Optional[List[str]] = None
+        output_dir: Optional[str] = None
     ):
         super().__init__("VideoGenerator")
         self._video_generator = video_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        self._preferred_provider = preferred_provider
-        self._backup_providers = backup_providers or ["google", "replicate"]
-        self._last_used_provider: Optional[str] = None
         
         if self._video_generator is None:
-            from integrations.video_client import video_client
-            self._video_generator = video_client
+            self._video_generator = self._create_default_generator()
     
-    @property
-    def last_used_provider(self) -> Optional[str]:
-        return self._last_used_provider
+    def _create_default_generator(self) -> VideoGeneratorProtocol:
+        """创建默认视频生成器（mock 实现）"""
+        class MockVideoGenerator:
+            def generate_video(
+                self, 
+                image_path: str, 
+                motion_prompt: Optional[str] = None,
+                duration: float = 4.0
+            ) -> Optional[bytes]:
+                logger.debug(f"[MOCK] Generating video from {image_path}")
+                return b"mock_video_data"
+        return MockVideoGenerator()
     
     def process(self, request: VideoGenRequest) -> VideoGenResult:
-        """图生视频 - 支持熔断降级"""
+        """
+        生成视频
+        
+        Args:
+            request: 图生视频请求
+            
+        Returns:
+            图生视频结果
+            
+        Raises:
+            FileNotFoundError: 输入图像不存在
+            RuntimeError: 视频生成失败
+        """
         self.logger.info(f"Generating video for shot {request.shot_id}")
         
-        providers_to_try = []
-        if self._preferred_provider:
-            providers_to_try.append(self._preferred_provider)
-        providers_to_try.extend([p for p in self._backup_providers if p not in providers_to_try])
+        if not os.path.exists(request.image_path):
+            raise FileNotFoundError(f"Image not found: {request.image_path}")
         
-        last_error = None
-        for provider_name in providers_to_try:
-            try:
-                self.logger.info(f"Trying video provider: {provider_name}")
-                client = ProviderFactory.get_video_client(provider_name)
-                
-                video_data = client.generate_video(
-                    image_path=request.image_path,
-                    motion_prompt=request.motion_prompt,
-                    camera_movement=request.camera_movement,
-                    duration=request.duration
-                )
-                
-                if video_data:
-                    self._last_used_provider = provider_name
-                    os.makedirs(self._output_dir, exist_ok=True)
-                    video_path = os.path.join(self._output_dir, f"video_shot_{request.shot_id}.mp4")
-                    with open(video_path, "wb") as f:
-                        f.write(video_data)
-                    
-                    return VideoGenResult(
-                        shot_id=request.shot_id,
-                        video_path=video_path,
-                        duration=request.duration,
-                        metadata={"provider": provider_name}
-                    )
-                    
-            except Exception as e:
-                error_str = str(e).lower()
-                is_rate_limit = "429" in str(e) or "rate limit" in error_str or "quota" in error_str
-                is_auth_error = "401" in str(e) or "403" in str(e) or "unauthorized" in error_str
-                
-                if is_rate_limit or is_auth_error:
-                    self.logger.warning(f"Provider {provider_name} failed (rate limit/auth): {e}")
-                    last_error = e
-                    continue
-                else:
-                    self.logger.error(f"Provider {provider_name} failed: {e}")
-                    last_error = e
-                    continue
+        motion_prompt = request.motion_prompt
+        if request.camera_movement:
+            motion_prompt = f"{motion_prompt or ''}, {request.camera_movement}".strip(", ")
         
-        raise RuntimeError(f"All providers failed for shot {request.shot_id}. Last error: {last_error}")
+        video_data = self._video_generator.generate_video(
+            image_path=request.image_path,
+            motion_prompt=motion_prompt,
+            duration=request.duration
+        )
+        
+        if not video_data:
+            raise RuntimeError(f"Failed to generate video for shot {request.shot_id}")
+        
+        os.makedirs(self._output_dir, exist_ok=True)
+        video_path = os.path.join(
+            self._output_dir,
+            f"video_shot_{sanitize_filename(request.shot_id)}.mp4"
+        )
+        
+        with open(video_path, "wb") as f:
+            f.write(video_data)
+        
+        self.logger.info(f"Saved video: {video_path}")
+        
+        return VideoGenResult(
+            shot_id=request.shot_id,
+            video_path=video_path,
+            duration=request.duration,
+            metadata={
+                "source_image": request.image_path,
+                "motion_prompt": motion_prompt,
+                "camera_movement": request.camera_movement
+            }
+        )
     
     def validate(self, request: VideoGenRequest) -> bool:
         """验证请求"""
@@ -497,40 +502,45 @@ class AudioGenerator(PipelineComponent):
     def process(self, request: AudioGenRequest) -> AudioGenResult:
         """
         生成音频
-        
+
         Args:
             request: TTS 音频生成请求
-            
+
         Returns:
             TTS 音频生成结果
-            
+
         Raises:
             RuntimeError: 音频生成失败
+            ValueError: 无效的 speed 参数
         """
+        # 验证 speed 参数，防止除零错误
+        if request.speed <= 0:
+            raise ValueError(f"Speed must be positive, got {request.speed}")
+
         self.logger.info(f"Generating audio for shot {request.shot_id}")
         self.logger.debug(f"Text: {request.text[:100]}...")
-        
+
         audio_data = self._tts_client.synthesize(
             text=request.text,
             voice_id=request.voice_id
         )
-        
+
         if not audio_data:
             raise RuntimeError(f"Failed to generate audio for shot {request.shot_id}")
-        
+
         os.makedirs(self._output_dir, exist_ok=True)
         audio_path = os.path.join(
-            self._output_dir, 
-            f"audio_shot_{request.shot_id}.mp3"
+            self._output_dir,
+            f"audio_shot_{sanitize_filename(request.shot_id)}.mp3"
         )
-        
+
         with open(audio_path, "wb") as f:
             f.write(audio_data)
-        
+
         estimated_duration = len(request.text) * 0.1 / request.speed
-        
+
         self.logger.info(f"Saved audio: {audio_path}")
-        
+
         return AudioGenResult(
             shot_id=request.shot_id,
             audio_path=audio_path,
@@ -770,7 +780,11 @@ class ShotPipeline:
         reference_image_path: Optional[str] = None
     ) -> KeyframeResult:
         """生成关键帧，支持 VLM 评分重试"""
-        for attempt in range(self.max_keyframe_retries):
+        # 确保至少执行一次生成
+        max_retries = max(1, self.max_keyframe_retries)
+        keyframe_result: Optional[KeyframeResult] = None
+
+        for attempt in range(max_retries):
             keyframe_result = self.keyframe_generator.process(KeyframeRequest(
                 shot_id=shot_id,
                 prompt=prompt,

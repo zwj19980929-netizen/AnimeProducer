@@ -355,10 +355,6 @@ Return ONLY the valid JSON object."""
         draft: CharacterDraft,
         session: Optional[Session] = None
     ) -> Character:
-        """
-        Create or update character.
-        Prioritizes passed session, then self.session, then creates new.
-        """
         logger.info(f"Creating/updating character '{draft.name}' for project '{project_id}'")
 
         character_id = f"{project_id}_{draft.name.lower().replace(' ', '_')}"
@@ -379,7 +375,6 @@ Return ONLY the valid JSON object."""
             if existing:
                 existing.prompt_base = prompt_base
                 existing.reference_image_path = reference_image_path
-                # 修复：如果是旧数据缺失 project_id，这里顺便补上
                 if not existing.project_id:
                     existing.project_id = project_id
 
@@ -390,7 +385,7 @@ Return ONLY the valid JSON object."""
             else:
                 character = Character(
                     character_id=character_id,
-                    project_id=project_id,  # <--- [核心修复] 添加了 project_id
+                    project_id=project_id,
                     name=draft.name,
                     prompt_base=prompt_base,
                     reference_image_path=reference_image_path
@@ -399,6 +394,10 @@ Return ONLY the valid JSON object."""
                 db.commit()
                 db.refresh(character)
                 return character
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -470,7 +469,6 @@ Return ONLY the valid JSON object."""
             current_ref_path = character_dir / "current_ref.png"
             shutil.copy2(best.path, current_ref_path)
 
-            # DB 更新逻辑
             db = session or self.session
             should_close = False
             if not db:
@@ -483,6 +481,10 @@ Return ONLY the valid JSON object."""
                     db_character.reference_image_path = str(current_ref_path)
                     db.add(db_character)
                     db.commit()
+            except Exception:
+                if should_close:
+                    db.rollback()
+                raise
             finally:
                 if should_close: db.close()
 

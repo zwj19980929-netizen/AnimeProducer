@@ -1,166 +1,149 @@
 import logging
 import io
+import base64
 import os
 from typing import Optional
 from PIL import Image
 
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    raise ImportError("Please install the Google GenAI SDK: pip install google-genai")
+# [核心变化] 引入新的 SDK 包名
+from google import genai
+from google.genai import types
 
 from config import settings
-from integrations.base_client import BaseImageClient
 
+# 配置日志
 logger = logging.getLogger(__name__)
 
 
-class GenClient(BaseImageClient):
+class GenClient:
     """
-    Real Image Generation Client using Google GenAI SDK.
-    
-    NOTE: Google Imagen API does NOT support reference images for character consistency.
-    When reference_image_path is provided, this client will automatically fallback
-    to AliyunWanxImageClient which supports the ref_img parameter.
+    Image Generation Client using the new Google GenAI SDK (v1.0+).
+    Wraps the 'google.genai' library to access Imagen 3 models.
     """
-    
-    provider_name: str = "google"
 
     def __init__(self):
         self.api_key = settings.GOOGLE_API_KEY
-        self.model_name = "imagen-4.0-generate-001"
-        self._fallback_client = None
+        self.client = None
 
         if not self.api_key:
-            logger.error("GOOGLE_API_KEY is not set. Image generation will fail.")
-            self.client = None
+            logger.warning("GOOGLE_API_KEY is not set. Image generation will fail.")
         else:
             try:
+                # [核心变化] 新版客户端初始化方式
                 self.client = genai.Client(api_key=self.api_key)
             except Exception as e:
                 logger.error(f"Failed to initialize Google GenAI Client: {e}")
-                self.client = None
 
-    def _get_fallback_client(self) -> Optional["BaseImageClient"]:
-        """延迟加载支持垫图的备用客户端（阿里云万相）"""
-        if self._fallback_client is None:
-            try:
-                from integrations.aliyun_client import aliyun_image_client
-                if aliyun_image_client.health_check():
-                    self._fallback_client = aliyun_image_client
-                    logger.info("Fallback to AliyunWanxImageClient for reference image support")
-            except Exception as e:
-                logger.warning(f"Failed to load Aliyun fallback client: {e}")
-        return self._fallback_client
+        # 指定 Imagen 模型版本
+        self.model_name = "imagen-3.0-generate-001"
 
-    def generate_image(
-        self,
-        prompt: str,
-        reference_image_path: Optional[str] = None,
-        style_preset: Optional[str] = None,
-        **kwargs
-    ) -> bytes:
+    def _load_reference_image(self, reference_image_path: str) -> Optional[bytes]:
+        """加载参考图片并返回字节数据"""
+        if not reference_image_path or not os.path.exists(reference_image_path):
+            return None
+        try:
+            with Image.open(reference_image_path) as img:
+                output_buffer = io.BytesIO()
+                img.save(output_buffer, format="PNG")
+                return output_buffer.getvalue()
+        except Exception as e:
+            logger.warning(f"Failed to load reference image: {e}")
+            return None
+
+    def _build_prompt_with_reference(self, prompt: str, reference_image_path: Optional[str]) -> str:
         """
-        Generates a real image using Google's Imagen model.
-        
-        :param prompt: The main prompt for image generation
-        :param reference_image_path: Optional reference image path for character consistency.
-                                     If provided, will fallback to Aliyun client since
-                                     Google Imagen does NOT support reference images.
-        :param style_preset: Optional global style preset to enforce consistent art style
-        
-        WARNING: Google Imagen API currently does NOT support reference/control images.
-        If reference_image_path is provided, this method will automatically use
-        AliyunWanxImageClient as a fallback which supports ref_img parameter.
+        构建包含参考图片描述的提示词
+        注意：Imagen 3 目前不支持直接的图像输入，所以我们通过增强提示词来保持一致性
         """
-        # ===== Fallback to Aliyun if reference image is provided =====
+        enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
+
         if reference_image_path and os.path.exists(reference_image_path):
-            fallback = self._get_fallback_client()
-            if fallback:
-                logger.warning(
-                    "⚠️ Google Imagen does NOT support reference images. "
-                    "Falling back to AliyunWanxImageClient for character consistency."
-                )
-                return fallback.generate_image(
-                    prompt=prompt,
-                    reference_image_path=reference_image_path,
-                    style_preset=style_preset,
-                    **kwargs
-                )
-            else:
-                logger.error(
-                    "❌ Reference image provided but no fallback client available! "
-                    "Google Imagen will ignore the reference image. "
-                    "Configure ALIYUN_ACCESS_KEY_ID to enable character consistency."
-                )
-        
+            # 添加一致性提示，告诉模型保持角色特征
+            enhanced_prompt = f"maintain character consistency, {enhanced_prompt}"
+            logger.debug(f"Reference image provided: {reference_image_path}")
+
+        return enhanced_prompt
+
+    def generate_image(self, prompt: str, reference_image_path: str = None) -> Optional[bytes]:
+        """
+        Generates an image using Google's Imagen model via new SDK.
+
+        Args:
+            prompt: 图像生成提示词
+            reference_image_path: 参考图片路径（用于保持角色一致性）
+
+        Returns:
+            生成的图片字节数据，失败返回 None
+        """
         if not self.client:
-            raise RuntimeError("Google GenAI Client not initialized (Missing API Key).")
+            logger.error("Cannot generate image: Client not initialized.")
+            return None
 
-        if style_preset:
-            enhanced_prompt = f"{prompt}, {style_preset}"
-        else:
-            enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
+        # 构建增强提示词（包含参考图片的一致性提示）
+        enhanced_prompt = self._build_prompt_with_reference(prompt, reference_image_path)
 
-        logger.info(f"🎨 Generating REAL image with {self.model_name}...")
+        logger.info(f"Generating image with Google GenAI ({self.model_name})...")
+        logger.debug(f"Prompt: {enhanced_prompt}")
+        if reference_image_path:
+            logger.debug(f"Reference image: {reference_image_path}")
 
         try:
-            response = self.client.models.generate_images(
+            # [核心变化] 新版生成接口调用方式
+            response = self.client.models.generate_image(
                 model=self.model_name,
                 prompt=enhanced_prompt,
-                config=types.GenerateImagesConfig(
+                config=types.GenerateImageConfig(
                     number_of_images=1,
                     aspect_ratio="1:1",
-                    output_mime_type="image/png",
+                    safety_filter_level="BLOCK_ONLY_HIGH",
                 )
             )
 
+            # [核心变化] 处理新版响应结构
+            # response.generated_images 是一个列表
             if response.generated_images:
-                image_entry = response.generated_images[0]
+                image_data = response.generated_images[0]
 
-                # -------------------------------------------------------
-                # 🛠️ 修复逻辑：更强壮的数据提取方式
-                # -------------------------------------------------------
+                # 新版 SDK 通常返回 PIL Image 对象或者包含 image_bytes 的对象
+                # 如果是 PIL Image 对象:
+                if hasattr(image_data, 'image'):
+                    # 这是一个 GeneratedImage 对象，里面有个 .image (PIL Image)
+                    pil_img = image_data.image
+                    output_buffer = io.BytesIO()
+                    pil_img.save(output_buffer, format="PNG")
+                    return output_buffer.getvalue()
 
-                # 1. 尝试直接从 GeneratedImage 条目获取 bytes
-                if hasattr(image_entry, 'image_bytes') and image_entry.image_bytes:
-                    return image_entry.image_bytes
+                # 如果直接是 bytes
+                elif isinstance(image_data, bytes):
+                    return image_data
 
-                # 2. 检查 image 属性
-                if hasattr(image_entry, 'image'):
-                    img_obj = image_entry.image
+                # 兜底：检查是否有 image_bytes 属性
+                elif hasattr(image_data, 'image_bytes'):
+                    return image_data.image_bytes
 
-                    # 情况 A: image 是 Google 的 types.Image 包装器 (有 image_bytes 属性)
-                    if hasattr(img_obj, 'image_bytes') and img_obj.image_bytes:
-                        return img_obj.image_bytes
-
-                    # 情况 B: image 是 PIL.Image 对象 (这是旧版或某些调用的行为)
-                    if isinstance(img_obj, Image.Image):
-                        output_buffer = io.BytesIO()
-                        img_obj.save(output_buffer, format="PNG")
-                        return output_buffer.getvalue()
-
-                    # 情况 C: image 是 types.Image 但没有 image_bytes，尝试手动处理
-                    # 有些版本的 SDK 可能把数据藏在 .data 或其他地方，或者这是一个我们未知的对象
-                    # 但通常上面的步骤已经能覆盖了。
-
-                    # 最后尝试：如果它看起来像 PIL 但不是 PIL，打印类型以供调试
-                    logger.warning(f"Unknown image object type: {type(img_obj)}")
-
-                # 如果都拿不到，抛出详细错误
-                raise RuntimeError(f"Could not extract bytes from response. Entry dir: {dir(image_entry)}")
+                else:
+                    logger.error(f"Unknown image data format: {type(image_data)}")
+                    return None
             else:
-                raise RuntimeError("API returned success but no images found.")
+                logger.error("Google Imagen returned no images.")
+                return None
 
         except Exception as e:
-            logger.error(f"❌ Google Image Generation Failed: {e}")
-            raise e
-
-    def health_check(self) -> bool:
-        """Check if Google GenAI client is available"""
-        return self.client is not None
+            logger.error(f"Error generating image with Google GenAI: {e}")
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.error(f"Model '{self.model_name}' not found. Check your API key permissions.")
+            return None
 
 
 # 单例实例
 gen_client = GenClient()
+
+
+# 占位符类，防止 ImportError
+class NanoBananaClient:
+    def __init__(self):
+        logger.warning("NanoBananaClient is deprecated and replaced by Google GenAI.")
+
+    def generate_image(self, *args, **kwargs):
+        logger.error("NanoBananaClient is disabled.")
+        return None
