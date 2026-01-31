@@ -1,4 +1,5 @@
 import logging
+from typing import Type, TypeVar
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
@@ -8,6 +9,8 @@ from config import settings
 
 # 配置日志记录器
 logger = logging.getLogger(__name__)
+
+T = TypeVar('T', bound=BaseModel)
 
 
 class LLMClient:
@@ -35,7 +38,7 @@ class LLMClient:
             max_retries=3,
         )
 
-    def generate_structured_output(self, prompt: str, pydantic_model: BaseModel, temperature: float = 0.2):
+    def generate_structured_output(self, prompt: str, pydantic_model: Type[T], temperature: float = 0.2) -> T | None:
         """
         生成结构化数据 (JSON)
         用于从小说中提取角色、生成分镜等需要严格格式的场景

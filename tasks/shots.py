@@ -57,16 +57,26 @@ def render_shot(self, shot_id: int):
     logger.info(f"🚀 Starting full pipeline for shot: {shot_id}")
     start_time = datetime.utcnow()
 
-    # 获取 Shot 信息
+    # 获取 Shot 信息，在 session 内提取所有需要的属性
     with Session(engine) as session:
         shot = session.get(Shot, shot_id)
+        if not shot:
+            logger.error(f"Shot {shot_id} not found!")
+            return {"status": "failed", "error": "Shot not found"}
+
+        # 提取所有需要的属性
+        shot_data = {
+            "shot_id": shot.shot_id,
+            "visual_prompt": shot.visual_prompt,
+            "dialogue": shot.dialogue,
+            "camera_movement": shot.camera_movement,
+            "duration": shot.duration,
+            "project_id": shot.project_id,
+        }
+
         # 获取关联的 Render 记录 ID
         render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
         render_id = render_record.id if render_record else None
-
-    if not shot:
-        logger.error(f"Shot {shot_id} not found!")
-        return {"status": "failed", "error": "Shot not found"}
 
     if render_id:
         update_render_status(render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1)
@@ -77,12 +87,12 @@ def render_shot(self, shot_id: int):
         logger.info(f"Processing shot {shot_id} via ShotPipeline...")
 
         artifact = pipeline.process_shot(
-            shot_id=shot.shot_id,
-            visual_prompt=shot.visual_prompt,
-            dialogue=shot.dialogue,
-            camera_movement=shot.camera_movement,
+            shot_id=shot_data["shot_id"],
+            visual_prompt=shot_data["visual_prompt"],
+            dialogue=shot_data["dialogue"],
+            camera_movement=shot_data["camera_movement"],
             voice_id="alloy",  # 默认声音，后续可从 Character 表获取
-            target_duration=shot.duration,
+            target_duration=shot_data["duration"],
             alignment_strategy=AlignmentStrategy.LOOP
         )
 
@@ -105,7 +115,7 @@ def render_shot(self, shot_id: int):
             "video_path": artifact.video_path,
             "audio_path": artifact.audio_path,
             "duration": artifact.duration,
-            "dialogue": shot.dialogue
+            "dialogue": shot_data["dialogue"]
         }
 
     except Exception as e:

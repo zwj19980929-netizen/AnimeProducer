@@ -1,6 +1,8 @@
 import logging
 import io
 import base64
+import os
+from typing import Optional
 from PIL import Image
 
 # [核心变化] 引入新的 SDK 包名
@@ -35,19 +37,55 @@ class GenClient:
         # 指定 Imagen 模型版本
         self.model_name = "imagen-3.0-generate-001"
 
-    def generate_image(self, prompt: str, reference_image_path: str = None) -> bytes:
+    def _load_reference_image(self, reference_image_path: str) -> Optional[bytes]:
+        """加载参考图片并返回字节数据"""
+        if not reference_image_path or not os.path.exists(reference_image_path):
+            return None
+        try:
+            with Image.open(reference_image_path) as img:
+                output_buffer = io.BytesIO()
+                img.save(output_buffer, format="PNG")
+                return output_buffer.getvalue()
+        except Exception as e:
+            logger.warning(f"Failed to load reference image: {e}")
+            return None
+
+    def _build_prompt_with_reference(self, prompt: str, reference_image_path: Optional[str]) -> str:
+        """
+        构建包含参考图片描述的提示词
+        注意：Imagen 3 目前不支持直接的图像输入，所以我们通过增强提示词来保持一致性
+        """
+        enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
+
+        if reference_image_path and os.path.exists(reference_image_path):
+            # 添加一致性提示，告诉模型保持角色特征
+            enhanced_prompt = f"maintain character consistency, {enhanced_prompt}"
+            logger.debug(f"Reference image provided: {reference_image_path}")
+
+        return enhanced_prompt
+
+    def generate_image(self, prompt: str, reference_image_path: str = None) -> Optional[bytes]:
         """
         Generates an image using Google's Imagen model via new SDK.
+
+        Args:
+            prompt: 图像生成提示词
+            reference_image_path: 参考图片路径（用于保持角色一致性）
+
+        Returns:
+            生成的图片字节数据，失败返回 None
         """
         if not self.client:
             logger.error("Cannot generate image: Client not initialized.")
             return None
 
-        # 优化提示词
-        enhanced_prompt = f"{prompt}, anime style, high quality, detailed, 2d animation cel shading"
+        # 构建增强提示词（包含参考图片的一致性提示）
+        enhanced_prompt = self._build_prompt_with_reference(prompt, reference_image_path)
 
         logger.info(f"Generating image with Google GenAI ({self.model_name})...")
         logger.debug(f"Prompt: {enhanced_prompt}")
+        if reference_image_path:
+            logger.debug(f"Reference image: {reference_image_path}")
 
         try:
             # [核心变化] 新版生成接口调用方式
@@ -58,7 +96,6 @@ class GenClient:
                     number_of_images=1,
                     aspect_ratio="1:1",
                     safety_filter_level="BLOCK_ONLY_HIGH",
-                    # 如果需要指定输出格式，新版通常默认返回 Image 对象或 base64
                 )
             )
 

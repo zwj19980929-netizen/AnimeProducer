@@ -120,5 +120,20 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
 
     except Exception as e:
         logger.error(f"Composition failed: {e}")
-        # 更新失败状态...
+        # 更新失败状态
+        with Session(engine) as session:
+            project = session.get(Project, project_id)
+            if project:
+                project.status = ProjectStatus.FAILED
+                project.error_message = str(e)
+                session.add(project)
+
+            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            if job:
+                job.status = JobStatus.FAILURE
+                job.error_message = str(e)
+                job.completed_at = datetime.utcnow()
+                session.add(job)
+
+            session.commit()
         raise e

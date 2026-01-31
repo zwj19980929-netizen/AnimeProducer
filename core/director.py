@@ -43,12 +43,7 @@ class Director:
     """导演编排器 - 统筹影视生产全流程"""
 
     def __init__(self, session: Session, max_workers: int = 4):
-        """
-        初始化导演
-        :param session: 注入的数据库会话
-        :param max_workers: 最大并发数
-        """
-        self.session = session  # <--- [修复] 接收并存储注入的 session
+        self.session = session
         self.max_workers = max_workers
 
     def create_project(self, name: str, description: Optional[str] = None) -> Project:
@@ -65,7 +60,6 @@ class Director:
         text: str,
         chapter_meta: Optional[Dict] = None
     ) -> Project:
-        # 直接使用 self.session，不再使用 with Session(engine)
         project = self.session.get(Project, project_id)
         if not project:
             raise ProjectNotFoundError(f"Project not found: {project_id}")
@@ -93,26 +87,14 @@ class Director:
 
         logger.info(f"Extracting characters for project {project_id}...")
 
-        # 使用 asset_manager 提取角色
-        # 注意：这里我们临时将 session 传递给 asset_manager 的方法（如果需要）
-        # 或者确保 asset_manager 能处理。鉴于 asset_manager 当前是全局单例，
-        # 我们这里调用 create_or_update_character 时需要稍微改动一下调用方式，
-        # 最好是直接在这里处理数据库，或者让 asset_manager 支持传入 session。
-
-        # 为了兼容性，我们修改下方的调用，手动处理 DB 部分，
-        # 或者假设 asset_manager 已经被我们修复支持 session 注入。
-
         character_drafts = asset_manager.extract_characters(project.script_content)
 
         if not character_drafts:
             logger.warning(f"No characters extracted for project {project_id}")
 
         for draft in character_drafts:
-            # 调用 asset_manager 创建角色，传入当前的 session
-            # 注意：我们需要修改 asset_manager.create_or_update_character 以支持 session 参数
             character = asset_manager.create_or_update_character(project_id, draft, session=self.session)
 
-            # 检查参考图
             if not os.path.exists(character.reference_image_path):
                 logger.info(f"Generating reference image for {character.name}")
                 candidates = asset_manager.generate_reference_images(
@@ -122,7 +104,6 @@ class Director:
                     project_id=project_id
                 )
                 if candidates:
-                    # 传入 session 以保存选择
                     asset_manager.select_best_reference(candidates, character, session=self.session)
 
         project.status = ProjectStatus.ASSETS_READY
@@ -153,15 +134,13 @@ class Director:
             logger.info(f"Clearing {len(existing_shots)} existing shots for rebuild.")
             for shot in existing_shots:
                 self.session.delete(shot)
-            # 这里可以不立即 commit，最后一起 commit
+            self.session.commit()  # 确保删除操作生效
 
-        # 调用 LLM
         raw_shots = script_parser.parse_novel_to_storyboard(project.script_content)
 
         shots = []
         for idx, raw_shot in enumerate(raw_shots):
             shot = Shot(
-                shot_id=idx + 1,
                 project_id=project_id,
                 sequence_order=idx,
                 duration=raw_shot.duration,
@@ -180,7 +159,6 @@ class Director:
         self.session.add(project)
         self.session.commit()
 
-        # 刷新 shot ID
         for shot in shots:
             self.session.refresh(shot)
 
@@ -201,7 +179,6 @@ class Director:
                 f"Project {project_id} has no storyboard. Call generate_storyboard first."
             )
 
-        # 创建 Job
         from core.models import JobType
         job = Job(
             project_id=project_id,
@@ -240,7 +217,6 @@ class Director:
         self.session.add(project)
         self.session.commit()
 
-        # 异步调用 Celery
         from tasks.jobs import render_project_job
         render_project_job.delay(project_id)
 

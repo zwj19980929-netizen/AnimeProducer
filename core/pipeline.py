@@ -10,8 +10,10 @@ Pipeline - 视觉流水线组件
 
 每个组件都是可独立测试的类
 """
+
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -19,6 +21,10 @@ from typing import Any, Dict, List, Optional, Protocol, TypeVar
 
 from config import settings
 from core.editor import AlignmentStrategy, ShotArtifact
+
+
+def sanitize_filename(name: Any) -> str:
+    return re.sub(r'[^\w\-_.]', '_', str(name))
 
 logger = logging.getLogger(__name__)
 
@@ -249,8 +255,8 @@ class KeyframeGenerator(PipelineComponent):
         
         os.makedirs(self._output_dir, exist_ok=True)
         image_path = os.path.join(
-            self._output_dir, 
-            f"keyframe_shot_{request.shot_id}.png"
+            self._output_dir,
+            f"keyframe_shot_{sanitize_filename(request.shot_id)}.png"
         )
         
         with open(image_path, "wb") as f:
@@ -431,8 +437,8 @@ class VideoGenerator(PipelineComponent):
         
         os.makedirs(self._output_dir, exist_ok=True)
         video_path = os.path.join(
-            self._output_dir, 
-            f"video_shot_{request.shot_id}.mp4"
+            self._output_dir,
+            f"video_shot_{sanitize_filename(request.shot_id)}.mp4"
         )
         
         with open(video_path, "wb") as f:
@@ -496,40 +502,45 @@ class AudioGenerator(PipelineComponent):
     def process(self, request: AudioGenRequest) -> AudioGenResult:
         """
         生成音频
-        
+
         Args:
             request: TTS 音频生成请求
-            
+
         Returns:
             TTS 音频生成结果
-            
+
         Raises:
             RuntimeError: 音频生成失败
+            ValueError: 无效的 speed 参数
         """
+        # 验证 speed 参数，防止除零错误
+        if request.speed <= 0:
+            raise ValueError(f"Speed must be positive, got {request.speed}")
+
         self.logger.info(f"Generating audio for shot {request.shot_id}")
         self.logger.debug(f"Text: {request.text[:100]}...")
-        
+
         audio_data = self._tts_client.synthesize(
             text=request.text,
             voice_id=request.voice_id
         )
-        
+
         if not audio_data:
             raise RuntimeError(f"Failed to generate audio for shot {request.shot_id}")
-        
+
         os.makedirs(self._output_dir, exist_ok=True)
         audio_path = os.path.join(
-            self._output_dir, 
-            f"audio_shot_{request.shot_id}.mp3"
+            self._output_dir,
+            f"audio_shot_{sanitize_filename(request.shot_id)}.mp3"
         )
-        
+
         with open(audio_path, "wb") as f:
             f.write(audio_data)
-        
+
         estimated_duration = len(request.text) * 0.1 / request.speed
-        
+
         self.logger.info(f"Saved audio: {audio_path}")
-        
+
         return AudioGenResult(
             shot_id=request.shot_id,
             audio_path=audio_path,
@@ -769,7 +780,11 @@ class ShotPipeline:
         reference_image_path: Optional[str] = None
     ) -> KeyframeResult:
         """生成关键帧，支持 VLM 评分重试"""
-        for attempt in range(self.max_keyframe_retries):
+        # 确保至少执行一次生成
+        max_retries = max(1, self.max_keyframe_retries)
+        keyframe_result: Optional[KeyframeResult] = None
+
+        for attempt in range(max_retries):
             keyframe_result = self.keyframe_generator.process(KeyframeRequest(
                 shot_id=shot_id,
                 prompt=prompt,
