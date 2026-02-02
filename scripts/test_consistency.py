@@ -1,16 +1,18 @@
+import logging
 import os
 import sys
 
-# Add root to sys.path
 sys.path.append(os.getcwd())
 
 from integrations.gen_client import gen_client
 from config import settings
 
-def test_consistency(reference_image_path: str):
-    print(f"Starting consistency test with reference: {reference_image_path}")
+logger = logging.getLogger(__name__)
 
-    # Define 5 different actions/prompts
+
+def test_consistency(reference_image_path: str):
+    logger.info(f"Starting consistency test with reference: {reference_image_path}")
+
     actions = [
         "drinking tea in a garden",
         "fighting with a sword",
@@ -24,7 +26,7 @@ def test_consistency(reference_image_path: str):
 
     for i, action in enumerate(actions):
         prompt = f"A character {action}, consistent with reference image."
-        print(f"Generating image {i+1}/5: {prompt}")
+        logger.info(f"Generating image {i+1}/5: {prompt}")
 
         image_data = gen_client.generate_image(prompt, reference_image_path)
 
@@ -32,15 +34,16 @@ def test_consistency(reference_image_path: str):
             file_path = os.path.join(output_dir, f"consistency_{i+1}.png")
             with open(file_path, "wb") as f:
                 f.write(image_data)
-            print(f"Saved to {file_path}")
+            logger.info(f"Saved to {file_path}")
         else:
-            print(f"Failed to generate image {i+1}")
+            logger.error(f"Failed to generate image {i+1}")
+
 
 if __name__ == "__main__":
-    # Create a dummy reference image if it doesn't exist for testing logic
+    logging.basicConfig(level=logging.INFO)
     ref_path = "assets/characters/test_ref.png"
     if not os.path.exists(ref_path):
         with open(ref_path, "wb") as f:
-            f.write(b'\x00') # Dummy content
+            f.write(b'\x00')
 
     test_consistency(ref_path)
