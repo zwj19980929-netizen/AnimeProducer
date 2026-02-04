@@ -104,7 +104,8 @@ class Settings(BaseSettings):
     DOUBAO_MODEL: str = "doubao-pro-4k"
     DOUBAO_ENDPOINT: str = "https://ark.cn-beijing.volces.com/api/v3"
     
-    # 阿里云万相
+    # 阿里云万相 (DashScope)
+    DASHSCOPE_API_KEY: str = ""  # 灵积 API Key (从 dashscope.console.aliyun.com 获取)
     ALIYUN_ACCESS_KEY_ID: str = ""
     ALIYUN_ACCESS_KEY_SECRET: str = ""
     ALIYUN_REGION: str = "cn-shanghai"

@@ -21,7 +21,7 @@ from api.schemas import (
     ShotResponse,
 )
 from core.errors import ProjectNotFoundError
-from core.models import Project, ProjectStatus, Shot, Job, Chapter, ChapterStatus
+from core.models import Project, ProjectStatus, Shot, Job, Chapter, ChapterStatus, ShotRender, Character, CharacterState
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -156,8 +156,8 @@ def delete_project(
     project_id: str,
     session: DBSession,
 ) -> None:
-    """Delete a project."""
-    logger.info(f"Deleting project: {project_id}")
+    """Delete a project and all related data (cascade delete)."""
+    logger.info(f"Deleting project with cascade: {project_id}")
 
     project = session.get(Project, project_id)
     if not project:
@@ -166,10 +166,62 @@ def delete_project(
             detail=f"Project not found: {project_id}",
         )
 
+    # 1. 删除 ShotRender（镜头渲染）
+    shot_renders = session.exec(
+        select(ShotRender).where(ShotRender.project_id == project_id)
+    ).all()
+    for render in shot_renders:
+        session.delete(render)
+    logger.debug(f"Deleted {len(shot_renders)} shot renders for project {project_id}")
+
+    # 2. 删除 Shot（分镜）
+    shots = session.exec(
+        select(Shot).where(Shot.project_id == project_id)
+    ).all()
+    for shot in shots:
+        session.delete(shot)
+    logger.debug(f"Deleted {len(shots)} shots for project {project_id}")
+
+    # 3. 删除 CharacterState（角色状态）- 需要先获取角色ID
+    characters = session.exec(
+        select(Character).where(Character.project_id == project_id)
+    ).all()
+    character_ids = [c.character_id for c in characters]
+
+    if character_ids:
+        character_states = session.exec(
+            select(CharacterState).where(CharacterState.character_id.in_(character_ids))
+        ).all()
+        for state in character_states:
+            session.delete(state)
+        logger.debug(f"Deleted {len(character_states)} character states for project {project_id}")
+
+    # 4. 删除 Character（角色）
+    for character in characters:
+        session.delete(character)
+    logger.debug(f"Deleted {len(characters)} characters for project {project_id}")
+
+    # 5. 删除 Chapter（章节）
+    chapters = session.exec(
+        select(Chapter).where(Chapter.project_id == project_id)
+    ).all()
+    for chapter in chapters:
+        session.delete(chapter)
+    logger.debug(f"Deleted {len(chapters)} chapters for project {project_id}")
+
+    # 6. 删除 Job（任务）
+    jobs = session.exec(
+        select(Job).where(Job.project_id == project_id)
+    ).all()
+    for job in jobs:
+        session.delete(job)
+    logger.debug(f"Deleted {len(jobs)} jobs for project {project_id}")
+
+    # 7. 最后删除项目本身
     session.delete(project)
     session.commit()
 
-    logger.info(f"Deleted project: {project_id}")
+    logger.info(f"Cascade deleted project: {project_id}")
 
 
 @router.put(

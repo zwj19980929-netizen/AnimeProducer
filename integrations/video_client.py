@@ -32,7 +32,7 @@ class VideoClient:
 
     def image_to_video(self, image_path: str, camera_movement: str = "static", duration: float = 3.0) -> bytes:
         """将图片转换为视频。"""
-        logger.info(f"[VEO API] 准备��图片生成视频: {image_path}")
+        logger.info(f"[VEO API] 准备从图片生成视频: {image_path}")
 
         if not self.client:
             raise RuntimeError("API Key 未配置，无法生成视频。")
@@ -65,6 +65,17 @@ class VideoClient:
         except Exception as e:
             logger.error(f"视频生成 API 调用失败: {e}")
             raise e
+
+    def generate_video(
+        self,
+        image_path: str,
+        motion_prompt: Optional[str] = None,
+        duration: float = 4.0,
+        **kwargs
+    ) -> bytes:
+        """生成视频（符合 BaseVideoClient 接口）。"""
+        camera_movement = motion_prompt or "smooth camera movement"
+        return self.image_to_video(image_path, camera_movement, duration)
 
     def save_video(self, video_data: bytes, output_path: str) -> bool:
         """保存视频到文件。"""

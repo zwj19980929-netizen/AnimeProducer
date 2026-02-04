@@ -126,6 +126,12 @@ class Director:
 
         raw_shots = script_parser.parse_novel_to_storyboard(project.script_content)
 
+        if not raw_shots:
+            logger.warning(f"No shots generated for project {project_id}")
+            raise InvalidProjectStateError(
+                f"Failed to generate storyboard for project {project_id}. LLM returned no shots."
+            )
+
         shots = []
         for idx, raw_shot in enumerate(raw_shots):
             shot = Shot(
@@ -135,7 +141,7 @@ class Director:
                 scene_description=raw_shot.scene_description,
                 visual_prompt=raw_shot.visual_prompt,
                 camera_movement=raw_shot.camera_movement,
-                characters_in_shot=raw_shot.characters_in_shot,
+                characters_in_shot=raw_shot.characters_in_shot or [],
                 dialogue=raw_shot.dialogue,
                 action_type=raw_shot.action_type
             )

@@ -49,7 +49,7 @@ class TTSClient:
             logger.warning("Empty text provided for TTS.")
             return b""
 
-        logger.info(f"🗣️ Generating REAL speech with OpenAI (Voice: {voice_id})...")
+        logger.info(f"Generating speech with OpenAI (Voice: {voice_id})...")
 
         try:
             # 确保使用有效的 OpenAI Voice ID
@@ -67,8 +67,18 @@ class TTSClient:
             return response.content
 
         except Exception as e:
-            logger.error(f"❌ OpenAI TTS Generation Failed: {e}")
+            logger.error(f"OpenAI TTS Generation Failed: {e}")
             raise e
+
+    def synthesize(
+        self,
+        text: str,
+        voice_id: Optional[str] = None,
+    ) -> bytes:
+        """
+        Synthesize speech (alias for generate_speech to match TTSProtocol).
+        """
+        return self.generate_speech(text, voice_id or "nova")
 
     def get_audio_duration(self, audio_path: str) -> float:
         """Get duration using moviepy (since we have it installed)."""

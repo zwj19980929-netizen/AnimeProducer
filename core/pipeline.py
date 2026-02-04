@@ -203,17 +203,17 @@ class KeyframeGenerator(PipelineComponent):
     """
     
     def __init__(
-        self, 
+        self,
         image_generator: Optional[ImageGeneratorProtocol] = None,
         output_dir: Optional[str] = None
     ):
         super().__init__("KeyframeGenerator")
         self._image_generator = image_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        
+
         if self._image_generator is None:
-            from integrations.gen_client import gen_client
-            self._image_generator = gen_client
+            from integrations.provider_factory import ProviderFactory
+            self._image_generator = ProviderFactory.get_image_client()
     
     def process(self, request: KeyframeRequest) -> KeyframeResult:
         """
@@ -370,30 +370,18 @@ class VideoGenerator(PipelineComponent):
     """
     
     def __init__(
-        self, 
+        self,
         video_generator: Optional[VideoGeneratorProtocol] = None,
         output_dir: Optional[str] = None
     ):
         super().__init__("VideoGenerator")
         self._video_generator = video_generator
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        
+
         if self._video_generator is None:
-            self._video_generator = self._create_default_generator()
-    
-    def _create_default_generator(self) -> VideoGeneratorProtocol:
-        """创建默认视频生成器（mock 实现）"""
-        class MockVideoGenerator:
-            def generate_video(
-                self, 
-                image_path: str, 
-                motion_prompt: Optional[str] = None,
-                duration: float = 4.0
-            ) -> Optional[bytes]:
-                logger.debug(f"[MOCK] Generating video from {image_path}")
-                return b"mock_video_data"
-        return MockVideoGenerator()
-    
+            from integrations.provider_factory import ProviderFactory
+            self._video_generator = ProviderFactory.get_video_client()
+
     def process(self, request: VideoGenRequest) -> VideoGenResult:
         """
         生成视频
@@ -467,29 +455,18 @@ class AudioGenerator(PipelineComponent):
     """
     
     def __init__(
-        self, 
+        self,
         tts_client: Optional[TTSProtocol] = None,
         output_dir: Optional[str] = None
     ):
         super().__init__("AudioGenerator")
         self._tts_client = tts_client
         self._output_dir = output_dir or settings.OUTPUT_DIR
-        
+
         if self._tts_client is None:
-            self._tts_client = self._create_default_tts()
-    
-    def _create_default_tts(self) -> TTSProtocol:
-        """创建默认 TTS 客户端（mock 实现）"""
-        class MockTTS:
-            def synthesize(
-                self, 
-                text: str, 
-                voice_id: Optional[str] = None
-            ) -> Optional[bytes]:
-                logger.debug(f"[MOCK] Synthesizing: {text[:50]}...")
-                return b"mock_audio_data"
-        return MockTTS()
-    
+            from integrations.provider_factory import ProviderFactory
+            self._tts_client = ProviderFactory.get_tts_client()
+
     def process(self, request: AudioGenRequest) -> AudioGenResult:
         """
         生成音频

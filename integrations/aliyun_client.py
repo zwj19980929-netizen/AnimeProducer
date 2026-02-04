@@ -16,20 +16,20 @@ logger = logging.getLogger(__name__)
 
 
 class AliyunWanxImageClient(BaseImageClient):
-    """阿里云万相图像生成客户端"""
-    
+    """阿里云万相图像生成客户端 (DashScope API)"""
+
     provider_name: str = "aliyun"
-    
+
     def __init__(self):
-        self.access_key_id = settings.ALIYUN_ACCESS_KEY_ID
-        self.access_key_secret = settings.ALIYUN_ACCESS_KEY_SECRET
+        # 优先使用 DashScope API Key，其次使用 Access Key ID
+        self.api_key = settings.DASHSCOPE_API_KEY or settings.ALIYUN_ACCESS_KEY_ID
         self.region = settings.ALIYUN_REGION
         self.model = settings.ALIYUN_WANX_MODEL
         self.endpoint = "https://dashscope.aliyuncs.com/api/v1"
-        
-        if not self.access_key_id:
-            logger.warning("阿里云 Access Key 未配置")
-    
+
+        if not self.api_key:
+            logger.warning("阿里云 DashScope API Key 未配置")
+
     def generate_image(
         self,
         prompt: str,
@@ -38,11 +38,11 @@ class AliyunWanxImageClient(BaseImageClient):
         **kwargs
     ) -> bytes:
         """使用万相生成图像"""
-        if not self.access_key_id:
-            raise AuthenticationError("阿里云 Access Key 未配置")
-        
+        if not self.api_key:
+            raise AuthenticationError("阿里云 DashScope API Key 未配置")
+
         headers = {
-            "Authorization": f"Bearer {self.access_key_id}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable"
         }
@@ -116,22 +116,22 @@ class AliyunWanxImageClient(BaseImageClient):
             raise
     
     def health_check(self) -> bool:
-        return bool(self.access_key_id)
+        return bool(self.api_key)
 
 
 class AliyunWanxVideoClient(BaseVideoClient):
-    """阿里云万相视频生成客户端"""
-    
+    """阿里云万相视频生成客户端 (DashScope API)"""
+
     provider_name: str = "aliyun"
-    
+
     def __init__(self):
-        self.access_key_id = settings.ALIYUN_ACCESS_KEY_ID
-        self.access_key_secret = settings.ALIYUN_ACCESS_KEY_SECRET
+        # 优先使用 DashScope API Key，其次使用 Access Key ID
+        self.api_key = settings.DASHSCOPE_API_KEY or settings.ALIYUN_ACCESS_KEY_ID
         self.endpoint = "https://dashscope.aliyuncs.com/api/v1"
-        
-        if not self.access_key_id:
-            logger.warning("阿里云 Access Key 未配置")
-    
+
+        if not self.api_key:
+            logger.warning("阿里云 DashScope API Key 未配置")
+
     def generate_video(
         self,
         image_path: str,
@@ -140,11 +140,11 @@ class AliyunWanxVideoClient(BaseVideoClient):
         **kwargs
     ) -> bytes:
         """使用万相图生视频"""
-        if not self.access_key_id:
-            raise AuthenticationError("阿里云 Access Key 未配置")
-        
+        if not self.api_key:
+            raise AuthenticationError("阿里云 DashScope API Key 未配置")
+
         headers = {
-            "Authorization": f"Bearer {self.access_key_id}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "X-DashScope-Async": "enable"
         }
@@ -210,7 +210,7 @@ class AliyunWanxVideoClient(BaseVideoClient):
             raise
     
     def health_check(self) -> bool:
-        return bool(self.access_key_id)
+        return bool(self.api_key)
 
 
 aliyun_image_client = AliyunWanxImageClient()
