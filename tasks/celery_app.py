@@ -13,6 +13,10 @@ celery_app = Celery(
     include=["tasks.jobs", "tasks.shots"],
 )
 
+# Windows 兼容性：使用 solo 池代替 prefork（billiard 在 Windows 上有权限问题）
+if sys.platform == "win32":
+    celery_app.conf.worker_pool = "solo"
+
 celery_app.conf.update(
     task_acks_late=True,
     task_track_started=True,

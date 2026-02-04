@@ -84,17 +84,39 @@ class GenClient:
             if response.generated_images:
                 image_data = response.generated_images[0]
 
-                if hasattr(image_data, 'image'):
-                    pil_img = image_data.image
-                    output_buffer = io.BytesIO()
-                    pil_img.save(output_buffer, format="PNG")
-                    return output_buffer.getvalue()
+                # 优先使用 image_bytes（原始字节数据）
+                if hasattr(image_data, 'image_bytes') and image_data.image_bytes:
+                    return image_data.image_bytes
+
+                # 如果有 image 属性，可能是 PIL Image 或 Google SDK Image 对象
+                if hasattr(image_data, 'image') and image_data.image is not None:
+                    img_obj = image_data.image
+                    # 检查是否是 PIL Image
+                    if isinstance(img_obj, Image.Image):
+                        output_buffer = io.BytesIO()
+                        img_obj.save(output_buffer, format="PNG")
+                        return output_buffer.getvalue()
+                    # Google SDK Image 对象可能有 _pil_image 属性
+                    elif hasattr(img_obj, '_pil_image'):
+                        output_buffer = io.BytesIO()
+                        img_obj._pil_image.save(output_buffer, format="PNG")
+                        return output_buffer.getvalue()
+                    # 尝试直接转换为 bytes
+                    elif hasattr(img_obj, 'data'):
+                        return img_obj.data
+                    else:
+                        # 尝试用 PIL 打开（如果是类文件对象）
+                        try:
+                            output_buffer = io.BytesIO()
+                            pil_img = Image.open(io.BytesIO(bytes(img_obj)))
+                            pil_img.save(output_buffer, format="PNG")
+                            return output_buffer.getvalue()
+                        except Exception:
+                            logger.error(f"Cannot convert image object: {type(img_obj)}")
+                            return None
 
                 elif isinstance(image_data, bytes):
                     return image_data
-
-                elif hasattr(image_data, 'image_bytes'):
-                    return image_data.image_bytes
 
                 else:
                     logger.error(f"Unknown image data format: {type(image_data)}")

@@ -83,6 +83,8 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 **B. 启动 Celery Worker（异步任务处理）**
 ```bash
 celery -A tasks.celery_app worker --loglevel=info
+win
+celery -A tasks.celery_app worker --loglevel=info --pool=solo
 ```
 
 **C. 访问 API 文档**

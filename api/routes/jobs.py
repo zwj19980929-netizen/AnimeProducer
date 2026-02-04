@@ -17,7 +17,7 @@ from api.schemas import (
     ShotRenderListResponse,
     ShotRenderResponse,
 )
-from core.models import Job, JobStatus, JobType, Project, ShotRender
+from core.models import Job, JobStatus, JobType, Project, ShotRender, ShotRenderStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -277,12 +277,90 @@ def get_shot_render(
 ) -> ShotRender:
     """Get a shot render by ID."""
     logger.debug(f"Getting shot render: {render_id}")
-    
+
     render = session.get(ShotRender, render_id)
     if not render:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Shot render not found: {render_id}",
         )
-    
+
+    return render
+
+
+@router.post(
+    "/{job_id}/retry",
+    response_model=JobResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def retry_job(
+    job_id: str,
+    session: DBSession,
+) -> Job:
+    """Retry a failed job by creating a new job with the same parameters."""
+    logger.info(f"Retrying job: {job_id}")
+
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job not found: {job_id}",
+        )
+
+    if job.status != JobStatus.FAILURE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Can only retry failed jobs, current status: {job.status}",
+        )
+
+    # Create a new job with the same parameters
+    new_job = Job(
+        project_id=job.project_id,
+        job_type=job.job_type,
+    )
+
+    session.add(new_job)
+    session.commit()
+    session.refresh(new_job)
+
+    logger.info(f"Created retry job: {new_job.id} for original job: {job_id}")
+    return new_job
+
+
+@router.post(
+    "/shot-renders/{render_id}/retry",
+    response_model=ShotRenderResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def retry_shot_render(
+    render_id: str,
+    session: DBSession,
+) -> ShotRender:
+    """Retry a failed shot render by resetting its status."""
+    logger.info(f"Retrying shot render: {render_id}")
+
+    render = session.get(ShotRender, render_id)
+    if not render:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Shot render not found: {render_id}",
+        )
+
+    if render.status != ShotRenderStatus.FAILURE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Can only retry failed shot renders, current status: {render.status}",
+        )
+
+    # Reset the shot render status
+    render.status = ShotRenderStatus.PENDING
+    render.progress = 0.0
+    render.error_message = None
+    render.updated_at = datetime.utcnow()
+
+    session.add(render)
+    session.commit()
+    session.refresh(render)
+
+    logger.info(f"Reset shot render for retry: {render_id}")
     return render

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(.venvScriptspython.exe -c \"from google.genai import types; help\\(types.GeneratedImage\\)\")",
+      "Bash(cd:*)",
+      "Bash(.venvScriptspython.exe -c \"from google.genai import types; print\\(dir\\(types\\)\\)\")",
+      "Bash(D:zwj_projectAnimeProducer.venvScriptspython.exe -c \"from google import genai; from google.genai import types; img = types.GeneratedImage; print\\(type\\(img\\)\\); print\\(dir\\(img\\)\\)\")",
+      "Bash(python -c:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}
