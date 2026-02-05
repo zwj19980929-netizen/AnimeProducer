@@ -2,9 +2,17 @@
   <div class="min-h-screen bg-gradient-to-br from-gray-900 via-black to-gray-900">
     <div class="container mx-auto px-6 py-8">
       <!-- Header -->
-      <div class="mb-8">
-        <h1 class="text-4xl font-bold text-white mb-2">AnimeMatrix</h1>
-        <p class="text-gray-400">AI 驱动的动画制作工作室</p>
+      <div class="mb-8 flex items-center justify-between">
+        <div>
+          <h1 class="text-4xl font-bold text-white mb-2">AnimeMatrix</h1>
+          <p class="text-gray-400">AI 驱动的动画制作工作室</p>
+        </div>
+        <n-button quaternary @click="$router.push('/api-test')">
+          <template #icon>
+            <n-icon><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg></n-icon>
+          </template>
+          API 测试
+        </n-button>
       </div>
 
       <!-- Create Project Button -->

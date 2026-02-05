@@ -71,9 +71,28 @@ class VideoClient:
         image_path: str,
         motion_prompt: Optional[str] = None,
         duration: float = 4.0,
+        image_url: Optional[str] = None,
         **kwargs
     ) -> bytes:
-        """生成视频（符合 BaseVideoClient 接口）。"""
+        """生成视频（符合 BaseVideoClient 接口）。
+
+        Args:
+            image_path: 本地图片路径
+            motion_prompt: 运动提示词
+            duration: 视频时长
+            image_url: 图片 URL（Google Veo 不支持，会被忽略）
+        """
+        # Google Veo 需要本地文件，如果只有 URL 需要先下载
+        if image_url and not image_path:
+            import requests
+            import tempfile
+            logger.info(f"从 URL 下载图片: {image_url[:80]}...")
+            response = requests.get(image_url, timeout=30)
+            response.raise_for_status()
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                f.write(response.content)
+                image_path = f.name
+
         camera_movement = motion_prompt or "smooth camera movement"
         return self.image_to_video(image_path, camera_movement, duration)
 

@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from sqlmodel import Session
 
 from core.database import engine
-from core.models import Shot, ShotRender, ShotRenderStatus, Character
+from core.models import Shot, ShotRender, ShotRenderStatus, Character, Job, JobStatus
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
 from tasks.celery_app import celery_app
@@ -18,6 +18,20 @@ pipeline = ShotPipeline(
     enable_vlm_scoring=True,
     min_vlm_score=0.6
 )
+
+
+def is_job_cancelled(project_id: str) -> bool:
+    """检查项目的渲染任务是否已被取消。"""
+    try:
+        with Session(engine) as session:
+            job = session.query(Job).filter(
+                Job.project_id == project_id
+            ).order_by(Job.created_at.desc()).first()
+            if job and job.status == JobStatus.REVOKED:
+                return True
+    except Exception as e:
+        logger.warning(f"Failed to check job status: {e}")
+    return False
 
 
 def get_reference_image_for_shot(shot: Shot, session: Session) -> Optional[str]:
@@ -77,13 +91,20 @@ def render_shot(self, shot_id: int):
             logger.error(f"Shot {shot_id} not found!")
             return {"status": "failed", "error": "Shot not found"}
 
+        project_id = shot.project_id
+
+        # Check if job was cancelled before starting
+        if is_job_cancelled(project_id):
+            logger.info(f"Shot {shot_id} skipped - job was cancelled")
+            return {"status": "cancelled", "shot_id": shot_id}
+
         shot_data = {
             "shot_id": shot.shot_id,
             "visual_prompt": shot.visual_prompt,
             "dialogue": shot.dialogue,
             "camera_movement": shot.camera_movement,
             "duration": shot.duration,
-            "project_id": shot.project_id,
+            "project_id": project_id,
         }
 
         reference_image_path = get_reference_image_for_shot(shot, session)

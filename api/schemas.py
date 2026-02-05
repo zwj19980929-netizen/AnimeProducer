@@ -45,6 +45,7 @@ class ProjectResponse(BaseModel):
     script_content: str | None
     style_preset: str | None
     output_video_path: str | None
+    output_video_url: str | None  # OSS URL，用于前端播放/下载
     error_message: str | None
     project_metadata: dict[str, Any]
     created_at: datetime

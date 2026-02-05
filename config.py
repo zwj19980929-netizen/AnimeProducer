@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # LLM API Keys
     GOOGLE_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
-    LLM_MODEL: str = "gemini-1.5-pro"
+    LLM_MODEL: str = "gemini-2.5-pro"
 
     # Image Generation
     NANO_BANANA_API_KEY: str = ""
@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     ALIYUN_ACCESS_KEY_SECRET: str = ""
     ALIYUN_REGION: str = "cn-shanghai"
     ALIYUN_WANX_MODEL: str = "wanx-v1"
+
+    # 阿里云 OSS (用于图生视频上传图片)
+    ALIYUN_OSS_BUCKET: str = ""
+    ALIYUN_OSS_ENDPOINT: str = "oss-cn-shanghai.aliyuncs.com"  # 例如: oss-cn-shanghai.aliyuncs.com
     
     # 火山引擎
     VOLCENGINE_ACCESS_KEY: str = ""

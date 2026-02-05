@@ -64,6 +64,13 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
     """最终合成任务：收集所有 Shot 结果并拼接。"""
     logger.info(f"Composing project: {project_id}")
 
+    # Check if job was cancelled
+    with Session(engine) as session:
+        job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+        if job and job.status == JobStatus.REVOKED:
+            logger.info(f"Composition skipped - job was cancelled for project: {project_id}")
+            return {"status": "cancelled", "reason": "Job was cancelled"}
+
     valid_results = [r for r in shot_results if r and r.get("status") == "completed"]
 
     if not valid_results:
@@ -111,11 +118,30 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
             crossfade_duration=0.5
         )
 
+        # 上传到 OSS（如果已配置）
+        output_video_url = None
+        try:
+            from integrations.oss_service import OSSService
+            oss = OSSService.get_instance()
+            if oss.is_configured():
+                logger.info("正在上传最终视频到 OSS...")
+                with open(final_video_path, 'rb') as f:
+                    video_data = f.read()
+                output_video_url = oss.upload_video_bytes(
+                    video_data,
+                    filename=f"final_project_{project_id}",
+                    ext=".mp4"
+                )
+                logger.info(f"视频已上传到 OSS: {output_video_url}")
+        except Exception as oss_err:
+            logger.warning(f"OSS 上传失败，视频仅保存在本地: {oss_err}")
+
         with Session(engine) as session:
             project = session.get(Project, project_id)
             if project:
                 project.status = ProjectStatus.DONE
                 project.output_video_path = final_video_path
+                project.output_video_url = output_video_url
                 session.add(project)
 
             job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
@@ -128,7 +154,7 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
             session.commit()
 
         logger.info(f"Project composition complete! Saved to: {final_video_path}")
-        return {"status": "success", "path": final_video_path}
+        return {"status": "success", "path": final_video_path, "url": output_video_url}
 
     except Exception as e:
         logger.error(f"Composition failed: {e}")

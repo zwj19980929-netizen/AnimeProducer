@@ -80,6 +80,7 @@ class Project(SQLModel, table=True):
     genre: str | None = None
 
     output_video_path: str | None = None
+    output_video_url: str | None = None  # OSS URL，用于前端播放/下载
 
     error_message: str | None = None
     project_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))

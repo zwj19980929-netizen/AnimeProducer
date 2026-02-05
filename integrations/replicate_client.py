@@ -41,33 +41,44 @@ class ReplicateVideoClient(BaseVideoClient):
         motion_prompt: Optional[str] = None,
         camera_movement: Optional[str] = None,
         duration: float = 4.0,
+        image_url: Optional[str] = None,
         **kwargs
     ) -> bytes:
         """
         Generate video using PixVerse v4 via Replicate.
-        
+
         Args:
             image_path: Path to the input image
             motion_prompt: Motion description
             camera_movement: Camera movement type
             duration: Target duration in seconds
-            
+            image_url: Image URL (will download if no local path)
+
         Returns:
             Video bytes
         """
         if not self.is_available():
             raise RuntimeError("Replicate client not available (missing API token or library)")
-        
-        logger.info(f"🎬 [Replicate/PixVerse] Generating video from: {image_path}")
-        
+
+        logger.info(f"[Replicate/PixVerse] Generating video")
+
         prompt = motion_prompt or "Smooth animation"
         if camera_movement:
             prompt = f"{prompt}, {camera_movement} camera movement"
-        
+
         try:
-            with open(image_path, "rb") as f:
-                image_data = f.read()
-            
+            # 获取图片数据
+            if image_url and not image_path:
+                # 从 URL 下载
+                import requests
+                logger.info(f"从 URL 下载图片: {image_url[:80]}...")
+                response = requests.get(image_url, timeout=30)
+                response.raise_for_status()
+                image_data = response.content
+            else:
+                with open(image_path, "rb") as f:
+                    image_data = f.read()
+
             output = replicate.run(
                 self.model_id,
                 input={
@@ -77,7 +88,7 @@ class ReplicateVideoClient(BaseVideoClient):
                     "quality": "high"
                 }
             )
-            
+
             import urllib.request
             if isinstance(output, str):
                 with urllib.request.urlopen(output) as response:
@@ -86,9 +97,9 @@ class ReplicateVideoClient(BaseVideoClient):
                 return output.read()
             else:
                 raise RuntimeError(f"Unexpected output type: {type(output)}")
-                
+
         except Exception as e:
-            logger.error(f"❌ Replicate video generation failed: {e}")
+            logger.error(f"Replicate video generation failed: {e}")
             raise
 
 

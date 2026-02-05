@@ -1,5 +1,5 @@
 """API route modules."""
 
-from api.routes import assets, jobs, projects
+from api.routes import api_test, assets, jobs, projects
 
-__all__ = ["assets", "jobs", "projects"]
+__all__ = ["api_test", "assets", "jobs", "projects"]

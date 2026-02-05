@@ -23,7 +23,10 @@ import type {
   ChapterListResponse,
   PipelineStartRequest,
   PipelineStartResponse,
-  ErrorResponse
+  ErrorResponse,
+  ConfigStatusResponse,
+  ProviderTestResult,
+  AllTestsResponse
 } from '@/types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -227,6 +230,30 @@ class ApiClient {
 
   async retryShotRender(renderId: string): Promise<ShotRender> {
     const response = await this.client.post<ShotRender>(`/jobs/shot-renders/${renderId}/retry`)
+    return response.data
+  }
+
+  // API Test
+  async getApiConfig(): Promise<ConfigStatusResponse> {
+    const response = await this.client.get<ConfigStatusResponse>('/api-test/config')
+    return response.data
+  }
+
+  async testProvider(category: string, provider: string): Promise<ProviderTestResult> {
+    const response = await this.client.post<ProviderTestResult>(
+      `/api-test/test/${category}/${provider}`,
+      {},
+      { timeout: 60000 }
+    )
+    return response.data
+  }
+
+  async testAllProviders(): Promise<AllTestsResponse> {
+    const response = await this.client.post<AllTestsResponse>(
+      '/api-test/test-all',
+      {},
+      { timeout: 300000 }
+    )
     return response.data
   }
 }

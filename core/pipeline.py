@@ -43,16 +43,19 @@ class KeyframeRequest:
 class KeyframeResult:
     """关键帧生成结果。"""
     shot_id: int
-    image_path: str
+    image_path: str  # 本地路径（如果保存到本地）或空字符串
     image_data: Optional[bytes] = None
+    image_url: Optional[str] = None  # OSS URL（如果上传到云端）
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class VLMScoreRequest:
     """VLM 评分请求"""
-    image_path: str
+    image_path: str  # 本地路径（可为空）
     prompt: str
+    image_url: Optional[str] = None  # OSS URL
+    image_data: Optional[bytes] = None  # 图片二进制数据
     criteria: List[str] = field(default_factory=lambda: [
         "composition",
         "style_consistency",
@@ -74,7 +77,8 @@ class VLMScoreResult:
 class VideoGenRequest:
     """图生视频请求"""
     shot_id: int
-    image_path: str
+    image_path: str  # 本地路径（可为空）
+    image_url: Optional[str] = None  # OSS URL（优先使用）
     motion_prompt: Optional[str] = None
     camera_movement: Optional[str] = None
     duration: float = 4.0
@@ -155,10 +159,11 @@ class VLMProtocol(Protocol):
 class VideoGeneratorProtocol(Protocol):
     """视频生成器协议"""
     def generate_video(
-        self, 
-        image_path: str, 
+        self,
+        image_path: str,
         motion_prompt: Optional[str] = None,
-        duration: float = 4.0
+        duration: float = 4.0,
+        image_url: Optional[str] = None
     ) -> Optional[bytes]:
         ...
 
@@ -218,47 +223,63 @@ class KeyframeGenerator(PipelineComponent):
     def process(self, request: KeyframeRequest) -> KeyframeResult:
         """
         生成关键帧
-        
+
         Args:
             request: 关键帧生成请求
-            
+
         Returns:
             关键帧生成结果
-            
+
         Raises:
             RuntimeError: 图像生成失败
         """
         self.logger.info(f"Generating keyframe for shot {request.shot_id}")
         self.logger.debug(f"Prompt: {request.prompt[:100]}...")
-        
+
         if request.reference_image_path:
             self.logger.debug(f"Using reference image: {request.reference_image_path}")
-        
+
         full_prompt = self._build_prompt(request)
-        
+
         image_data = self._image_generator.generate_image(
             prompt=full_prompt,
             reference_image_path=request.reference_image_path
         )
-        
+
         if not image_data:
             raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}")
-        
-        os.makedirs(self._output_dir, exist_ok=True)
-        image_path = os.path.join(
-            self._output_dir,
-            f"keyframe_shot_{sanitize_filename(request.shot_id)}.png"
-        )
-        
-        with open(image_path, "wb") as f:
-            f.write(image_data)
-        
-        self.logger.info(f"Saved keyframe: {image_path}")
-        
+
+        # 优先上传到 OSS（节省本地空间）
+        image_url = None
+        image_path = ""
+
+        try:
+            from integrations.oss_service import is_oss_configured, upload_image_to_oss
+            if is_oss_configured():
+                filename = f"keyframe_shot_{sanitize_filename(request.shot_id)}"
+                image_url = upload_image_to_oss(image_data, filename=filename)
+                self.logger.info(f"Keyframe uploaded to OSS: {image_url}")
+        except Exception as e:
+            self.logger.warning(f"OSS upload failed, falling back to local storage: {e}")
+
+        # 如果 OSS 上传失败或未配置，保存到本地
+        if not image_url:
+            os.makedirs(self._output_dir, exist_ok=True)
+            image_path = os.path.join(
+                self._output_dir,
+                f"keyframe_shot_{sanitize_filename(request.shot_id)}.png"
+            )
+
+            with open(image_path, "wb") as f:
+                f.write(image_data)
+
+            self.logger.info(f"Saved keyframe locally: {image_path}")
+
         return KeyframeResult(
             shot_id=request.shot_id,
             image_path=image_path,
             image_data=image_data,
+            image_url=image_url,
             metadata={
                 "prompt": full_prompt,
                 "reference_image": request.reference_image_path,
@@ -320,39 +341,71 @@ class VLMScorer(PipelineComponent):
     def process(self, request: VLMScoreRequest) -> VLMScoreResult:
         """
         对图像进行评分
-        
+
         Args:
             request: VLM 评分请求
-            
+
         Returns:
             VLM 评分结果
         """
-        self.logger.info(f"Scoring image: {request.image_path}")
-        
-        if not os.path.exists(request.image_path):
-            raise FileNotFoundError(f"Image not found: {request.image_path}")
-        
-        result = self._vlm_client.score_image(request.image_path, request.prompt)
-        
-        criteria_scores = {
-            criterion: result.get(criterion, 0.0)
-            for criterion in request.criteria
-            if criterion in result
-        }
-        
-        score_result = VLMScoreResult(
-            image_path=request.image_path,
-            overall_score=result.get("overall_score", 0.0),
-            criteria_scores=criteria_scores,
-            feedback=result.get("feedback")
-        )
-        
-        self.logger.info(
-            f"Image score: {score_result.overall_score:.2f} "
-            f"(criteria: {criteria_scores})"
-        )
-        
-        return score_result
+        self.logger.info(f"Scoring image: {request.image_path or request.image_url or 'from bytes'}")
+
+        # 确定图片来源
+        image_path = request.image_path
+        temp_file = None
+
+        # 如果没有本地文件，尝试从 URL 下载或使用 image_data
+        if not image_path or not os.path.exists(image_path):
+            if request.image_data:
+                # 使用传入的图片数据创建临时文件
+                import tempfile
+                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                temp_file.write(request.image_data)
+                temp_file.close()
+                image_path = temp_file.name
+            elif request.image_url:
+                # 从 URL 下载图片
+                import tempfile
+                import requests
+                self.logger.info(f"Downloading image from URL for scoring...")
+                response = requests.get(request.image_url, timeout=30)
+                response.raise_for_status()
+                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                temp_file.write(response.content)
+                temp_file.close()
+                image_path = temp_file.name
+            else:
+                raise FileNotFoundError(f"Image not found: {request.image_path}")
+
+        try:
+            result = self._vlm_client.score_image(image_path, request.prompt)
+
+            criteria_scores = {
+                criterion: result.get(criterion, 0.0)
+                for criterion in request.criteria
+                if criterion in result
+            }
+
+            score_result = VLMScoreResult(
+                image_path=request.image_path or request.image_url or "",
+                overall_score=result.get("overall_score", 0.0),
+                criteria_scores=criteria_scores,
+                feedback=result.get("feedback")
+            )
+
+            self.logger.info(
+                f"Image score: {score_result.overall_score:.2f} "
+                f"(criteria: {criteria_scores})"
+            )
+
+            return score_result
+        finally:
+            # 清理临时文件
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                except:
+                    pass
     
     def validate(self, request: VLMScoreRequest) -> bool:
         """验证请求"""
@@ -385,52 +438,65 @@ class VideoGenerator(PipelineComponent):
     def process(self, request: VideoGenRequest) -> VideoGenResult:
         """
         生成视频
-        
+
         Args:
             request: 图生视频请求
-            
+
         Returns:
             图生视频结果
-            
+
         Raises:
             FileNotFoundError: 输入图像不存在
             RuntimeError: 视频生成失败
         """
         self.logger.info(f"Generating video for shot {request.shot_id}")
-        
-        if not os.path.exists(request.image_path):
-            raise FileNotFoundError(f"Image not found: {request.image_path}")
-        
+        self.logger.info(f"  image_path: {request.image_path}")
+        self.logger.info(f"  image_url: {request.image_url}")
+
+        # 确定图片来源：优先使用 URL，否则使用本地路径
+        image_source = request.image_url or request.image_path
+
+        if not image_source:
+            raise ValueError(f"No image source provided for shot {request.shot_id}")
+
+        # 如果是本地路径，检查文件是否存在
+        if not request.image_url and request.image_path:
+            if not os.path.exists(request.image_path):
+                raise FileNotFoundError(f"Image not found: {request.image_path}")
+
         motion_prompt = request.motion_prompt
         if request.camera_movement:
             motion_prompt = f"{motion_prompt or ''}, {request.camera_movement}".strip(", ")
-        
+
+        # 调用视频生成器
+        # 如果有 URL，传递 URL；否则传递本地路径
         video_data = self._video_generator.generate_video(
-            image_path=request.image_path,
+            image_path=request.image_path if not request.image_url else request.image_path,
+            image_url=request.image_url,
             motion_prompt=motion_prompt,
             duration=request.duration
         )
-        
+
         if not video_data:
             raise RuntimeError(f"Failed to generate video for shot {request.shot_id}")
-        
+
         os.makedirs(self._output_dir, exist_ok=True)
         video_path = os.path.join(
             self._output_dir,
             f"video_shot_{sanitize_filename(request.shot_id)}.mp4"
         )
-        
+
         with open(video_path, "wb") as f:
             f.write(video_data)
-        
+
         self.logger.info(f"Saved video: {video_path}")
-        
+
         return VideoGenResult(
             shot_id=request.shot_id,
             video_path=video_path,
             duration=request.duration,
             metadata={
-                "source_image": request.image_path,
+                "source_image": request.image_url or request.image_path,
                 "motion_prompt": motion_prompt,
                 "camera_movement": request.camera_movement
             }
@@ -497,9 +563,19 @@ class AudioGenerator(PipelineComponent):
             raise RuntimeError(f"Failed to generate audio for shot {request.shot_id}")
 
         os.makedirs(self._output_dir, exist_ok=True)
+
+        # 检测音频格式
+        ext = ".mp3"
+        if audio_data[:4] == b'RIFF':
+            ext = ".wav"
+        elif audio_data[:4] == b'fLaC':
+            ext = ".flac"
+        elif audio_data[:3] == b'OGG':
+            ext = ".ogg"
+
         audio_path = os.path.join(
             self._output_dir,
-            f"audio_shot_{sanitize_filename(request.shot_id)}.mp3"
+            f"audio_shot_{sanitize_filename(request.shot_id)}{ext}"
         )
 
         with open(audio_path, "wb") as f:
@@ -711,6 +787,7 @@ class ShotPipeline:
         video_result = self.video_generator.process(VideoGenRequest(
             shot_id=shot_id,
             image_path=keyframe_result.image_path,
+            image_url=keyframe_result.image_url,
             motion_prompt=visual_prompt,
             camera_movement=camera_movement,
             duration=target_duration
@@ -776,7 +853,9 @@ class ShotPipeline:
             
             score_result = self.vlm_scorer.process(VLMScoreRequest(
                 image_path=keyframe_result.image_path,
-                prompt=prompt
+                prompt=prompt,
+                image_url=keyframe_result.image_url,
+                image_data=keyframe_result.image_data
             ))
             
             if score_result.overall_score >= self.min_vlm_score:

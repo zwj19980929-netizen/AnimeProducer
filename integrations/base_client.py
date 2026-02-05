@@ -28,20 +28,28 @@ class BaseImageClient(ABC):
 
 class BaseVideoClient(ABC):
     """Base interface for video generation clients."""
-    
+
     provider_name: str = "base"
-    
+
     @abstractmethod
     def generate_video(
         self,
         image_path: str,
         motion_prompt: Optional[str] = None,
         duration: float = 4.0,
+        image_url: Optional[str] = None,
         **kwargs
     ) -> bytes:
-        """Generate video from image."""
+        """Generate video from image.
+
+        Args:
+            image_path: Local image path (may be empty if image_url is provided)
+            motion_prompt: Motion/camera movement description
+            duration: Video duration in seconds
+            image_url: Image URL (preferred over image_path if provided)
+        """
         pass
-    
+
     def health_check(self) -> bool:
         """Check if the provider is available."""
         return True

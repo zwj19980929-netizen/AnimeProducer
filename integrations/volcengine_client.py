@@ -71,20 +71,36 @@ class VolcEngineVideoClient(BaseVideoClient):
         image_path: str,
         motion_prompt: Optional[str] = None,
         duration: float = 4.0,
+        image_url: Optional[str] = None,
         **kwargs
     ) -> bytes:
-        """使用火山引擎生成视频"""
+        """使用火山引擎生成视频
+
+        Args:
+            image_path: 本地图片路径
+            motion_prompt: 运动提示词
+            duration: 视频时长
+            image_url: 图片 URL（会下载后使用）
+        """
         if not self.access_key or not self.secret_key:
             raise AuthenticationError("火山引擎 Access Key 未配置")
-        
-        # 读取图片并编码
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
-        
+
+        # 获取图片数据
+        if image_url and not image_path:
+            # 从 URL 下载
+            logger.info(f"从 URL 下载图片: {image_url[:80]}...")
+            img_response = requests.get(image_url, timeout=30, proxies={})
+            img_response.raise_for_status()
+            image_b64 = base64.b64encode(img_response.content).decode("utf-8")
+        else:
+            # 读取本地文件
+            with open(image_path, "rb") as f:
+                image_b64 = base64.b64encode(f.read()).decode("utf-8")
+
         # 构建请求
         path = "/v1/video/generate"
         params = {"Action": "CVProcess", "Version": "2022-08-31"}
-        
+
         body = json.dumps({
             "req_key": "img2video",
             "binary_data_base64": [image_b64],

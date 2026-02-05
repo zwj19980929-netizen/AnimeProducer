@@ -16,6 +16,8 @@ celery_app = Celery(
 # Windows 兼容性：使用 solo 池代替 prefork（billiard 在 Windows 上有权限问题）
 if sys.platform == "win32":
     celery_app.conf.worker_pool = "solo"
+    # solo pool 不支持任务终止，禁用 worker 关闭时的取消尝试
+    celery_app.conf.worker_cancel_long_running_tasks_on_connection_loss = False
 
 celery_app.conf.update(
     task_acks_late=True,

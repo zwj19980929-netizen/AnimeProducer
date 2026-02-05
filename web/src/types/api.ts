@@ -99,6 +99,7 @@ export interface Project {
   script_content?: string
   style_preset?: string
   output_video_path?: string
+  output_video_url?: string  // OSS URL，用于播放/下载
   error_message?: string
   project_metadata?: ProjectMetadata
   created_at: string
@@ -325,3 +326,73 @@ export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = [
   JobStatus.PENDING,
   JobStatus.STARTED
 ] as const
+
+// API Test Types
+export interface ProviderTestResult {
+  provider: string
+  category: string
+  status: 'success' | 'failed' | 'skipped'
+  message: string
+  latency_ms?: number
+  details?: Record<string, unknown>
+}
+
+export interface AllTestsResponse {
+  timestamp: string
+  results: ProviderTestResult[]
+  summary: {
+    total: number
+    success: number
+    failed: number
+    skipped: number
+  }
+}
+
+export interface ProviderConfig {
+  configured: boolean
+  key?: string
+  model?: string
+  endpoint?: string
+  access_key?: string
+  region?: string
+  app_id?: string
+  group_id?: string
+}
+
+export interface ConfigStatusResponse {
+  providers: {
+    llm: {
+      google: ProviderConfig
+      openai: ProviderConfig
+      deepseek: ProviderConfig
+      doubao: ProviderConfig
+      current_provider: string
+    }
+    image: {
+      google: ProviderConfig
+      aliyun: ProviderConfig
+      replicate: ProviderConfig
+      current_provider: string
+    }
+    video: {
+      google: ProviderConfig
+      aliyun: ProviderConfig
+      replicate: ProviderConfig
+      volcengine: ProviderConfig
+      current_provider: string
+    }
+    tts: {
+      openai: ProviderConfig
+      doubao: ProviderConfig
+      aliyun: ProviderConfig
+      minimax: ProviderConfig
+      zhipu: ProviderConfig
+      current_provider: string
+    }
+    vlm: {
+      backend: string
+      model: string
+      configured: boolean
+    }
+  }
+}

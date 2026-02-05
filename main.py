@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import assets, jobs, projects
+from api.routes import api_test, assets, jobs, projects
 from config import settings
 from core.database import init_db
 from core.errors import AnimeMatrixError
@@ -105,5 +105,6 @@ def api_info():
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
+app.include_router(api_test.router, prefix="/api/v1/api-test", tags=["api-test"])
 
 app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")

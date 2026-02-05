@@ -17,7 +17,7 @@ from api.schemas import (
     ShotRenderListResponse,
     ShotRenderResponse,
 )
-from core.models import Job, JobStatus, JobType, Project, ShotRender, ShotRenderStatus
+from core.models import Job, JobStatus, JobType, Project, ProjectStatus, ShotRender, ShotRenderStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -222,14 +222,22 @@ def cancel_job(
     # TODO: Actually revoke Celery task
     # if job.celery_task_id:
     #     celery_app.control.revoke(job.celery_task_id, terminate=True)
-    
+
     job.status = JobStatus.REVOKED
     job.completed_at = datetime.utcnow()
-    
+
+    # Update project status when cancelling a render job
+    project = session.get(Project, job.project_id)
+    if project and project.status in (ProjectStatus.RENDERING, ProjectStatus.COMPOSITED):
+        # Revert to STORYBOARD_READY so user can re-render
+        project.status = ProjectStatus.STORYBOARD_READY
+        project.updated_at = datetime.utcnow()
+        session.add(project)
+
     session.add(job)
     session.commit()
     session.refresh(job)
-    
+
     logger.info(f"Cancelled job: {job_id}")
     return job
 
