@@ -10,6 +10,9 @@ from typing import Any, Dict, List, Optional, Protocol, TypeVar
 
 from config import settings
 from core.editor import AlignmentStrategy, ShotArtifact
+from core.duration_planner import DurationPlanner, DurationPlan, get_audio_duration
+from core.prompt_translator import PromptTranslator, StructuredPrompt, prompt_translator
+from core.character_registry import CharacterRegistry, CharacterAsset, character_registry
 
 
 def sanitize_filename(name: Any) -> str:
@@ -203,23 +206,32 @@ class PipelineComponent(ABC):
 class KeyframeGenerator(PipelineComponent):
     """
     关键帧生成器
-    
-    使用图像生成模型创建关键帧，支持注入参考图像以保持角色一致性
+
+    使用图像生成模型创建关键帧，支持：
+    - 注入参考图像以保持角色一致性
+    - 自动将自然语言提示词转换为 Danbooru 风格标签
+    - 所有生成的图片强制上传到 OSS
     """
-    
+
     def __init__(
         self,
         image_generator: Optional[ImageGeneratorProtocol] = None,
-        output_dir: Optional[str] = None
+        prompt_translator: Optional[PromptTranslator] = None,
+        enable_prompt_translation: bool = True
     ):
         super().__init__("KeyframeGenerator")
         self._image_generator = image_generator
-        self._output_dir = output_dir or settings.OUTPUT_DIR
+        self._prompt_translator = prompt_translator
+        self._enable_prompt_translation = enable_prompt_translation
 
         if self._image_generator is None:
             from integrations.provider_factory import ProviderFactory
             self._image_generator = ProviderFactory.get_image_client()
-    
+
+        if self._prompt_translator is None:
+            from core.prompt_translator import prompt_translator as default_translator
+            self._prompt_translator = default_translator
+
     def process(self, request: KeyframeRequest) -> KeyframeResult:
         """
         生成关键帧
@@ -231,15 +243,17 @@ class KeyframeGenerator(PipelineComponent):
             关键帧生成结果
 
         Raises:
-            RuntimeError: 图像生成失败
+            RuntimeError: 图像生成失败或 OSS 上传失败
         """
         self.logger.info(f"Generating keyframe for shot {request.shot_id}")
-        self.logger.debug(f"Prompt: {request.prompt[:100]}...")
+        self.logger.debug(f"Original prompt: {request.prompt[:100]}...")
 
         if request.reference_image_path:
             self.logger.debug(f"Using reference image: {request.reference_image_path}")
 
-        full_prompt = self._build_prompt(request)
+        # 构建提示词（可选择是否翻译为 Danbooru 风格）
+        full_prompt, negative_prompt = self._build_prompt(request)
+        self.logger.debug(f"Final prompt: {full_prompt[:200]}...")
 
         image_data = self._image_generator.generate_image(
             prompt=full_prompt,
@@ -249,95 +263,119 @@ class KeyframeGenerator(PipelineComponent):
         if not image_data:
             raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}")
 
-        # 优先上传到 OSS（节省本地空间）
-        image_url = None
-        image_path = ""
+        # 强制上传到 OSS
+        from integrations.oss_service import require_oss
+        oss = require_oss()
 
-        try:
-            from integrations.oss_service import is_oss_configured, upload_image_to_oss
-            if is_oss_configured():
-                filename = f"keyframe_shot_{sanitize_filename(request.shot_id)}"
-                image_url = upload_image_to_oss(image_data, filename=filename)
-                self.logger.info(f"Keyframe uploaded to OSS: {image_url}")
-        except Exception as e:
-            self.logger.warning(f"OSS upload failed, falling back to local storage: {e}")
-
-        # 如果 OSS 上传失败或未配置，保存到本地
-        if not image_url:
-            os.makedirs(self._output_dir, exist_ok=True)
-            image_path = os.path.join(
-                self._output_dir,
-                f"keyframe_shot_{sanitize_filename(request.shot_id)}.png"
-            )
-
-            with open(image_path, "wb") as f:
-                f.write(image_data)
-
-            self.logger.info(f"Saved keyframe locally: {image_path}")
+        filename = f"keyframe_shot_{sanitize_filename(request.shot_id)}"
+        image_url = oss.upload_image_bytes(image_data, filename=filename)
+        self.logger.info(f"Keyframe uploaded to OSS: {image_url}")
 
         return KeyframeResult(
             shot_id=request.shot_id,
-            image_path=image_path,
+            image_path="",  # 不保存本地
             image_data=image_data,
             image_url=image_url,
             metadata={
                 "prompt": full_prompt,
+                "negative_prompt": negative_prompt,
+                "original_prompt": request.prompt,
                 "reference_image": request.reference_image_path,
-                "style_preset": request.style_preset
+                "style_preset": request.style_preset,
+                "prompt_translated": self._enable_prompt_translation
             }
         )
-    
-    def _build_prompt(self, request: KeyframeRequest) -> str:
-        """构建完整的提示词"""
-        parts = [request.prompt]
-        
-        if request.style_preset:
-            parts.append(request.style_preset)
-        
-        parts.append("high quality, detailed")
-        
-        return ", ".join(parts)
-    
+
+    def _build_prompt(self, request: KeyframeRequest) -> tuple:
+        """
+        构建完整的提示词
+
+        Args:
+            request: 关键帧请求
+
+        Returns:
+            (positive_prompt, negative_prompt) 元组
+        """
+        if self._enable_prompt_translation:
+            # 使用提示词翻译器转换为 Danbooru 风格
+            structured = self._prompt_translator.translate(
+                natural_prompt=request.prompt,
+                style_preset=request.style_preset,
+            )
+            return structured.positive, structured.negative
+        else:
+            # 使用原始提示词（简单拼接）
+            parts = [request.prompt]
+            if request.style_preset:
+                parts.append(request.style_preset)
+            parts.append("high quality, detailed")
+            return ", ".join(parts), request.negative_prompt
+
     def validate(self, request: KeyframeRequest) -> bool:
         """验证请求"""
         if not request.prompt:
             self.logger.error("Prompt is required")
             return False
-        
+
         if request.reference_image_path and not os.path.exists(request.reference_image_path):
             self.logger.warning(f"Reference image not found: {request.reference_image_path}")
-        
+
         return True
 
 
 class VLMScorer(PipelineComponent):
     """
     VLM 评分器
-    
-    使用视觉语言模型对生成的图像进行质量评分
+
+    使用视觉语言模型对生成的图像进行质量评分。
+    支持 Gemini Vision 和 OpenAI GPT-4o 作为后端。
+    不使用 Mock，必须配置真实的 VLM API。
     """
-    
+
     def __init__(self, vlm_client: Optional[VLMProtocol] = None):
         super().__init__("VLMScorer")
         self._vlm_client = vlm_client
-        
+
         if self._vlm_client is None:
-            self._vlm_client = self._create_default_vlm()
-    
-    def _create_default_vlm(self) -> VLMProtocol:
-        """创建默认 VLM 客户端（mock 实现）"""
-        class MockVLM:
+            self._vlm_client = self._create_vlm_client()
+
+    def _create_vlm_client(self) -> VLMProtocol:
+        """创建真实的 VLM 客户端"""
+        from integrations.vlm_client import VLMClient
+        real_client = VLMClient()
+
+        # 包装 VLMClient 以符合 VLMProtocol 接口
+        class VLMClientWrapper:
+            def __init__(self, client: VLMClient):
+                self._client = client
+
             def score_image(self, image_path: str, prompt: str) -> Dict[str, Any]:
-                return {
-                    "overall_score": 0.85,
-                    "composition": 0.8,
-                    "style_consistency": 0.9,
-                    "prompt_adherence": 0.85,
-                    "quality": 0.85,
-                    "feedback": "Good overall quality"
-                }
-        return MockVLM()
-    
+                """评分单张图片"""
+                # 使用 VLMClient 的 score_keyframes 方法
+                candidates = [{"id": "single", "image_path": image_path}]
+                results = self._client.score_keyframes(
+                    candidates=candidates,
+                    scene_description=prompt,
+                    characters=[]
+                )
+
+                if results and len(results) > 0:
+                    scored = results[0]
+                    # 转换为统一的评分格式 (0-1 范围)
+                    return {
+                        "overall_score": scored.weighted_total / 100.0,
+                        "composition": scored.scores.composition_score / 100.0,
+                        "style_consistency": scored.scores.character_consistency_score / 100.0,
+                        "prompt_adherence": scored.scores.prompt_match_score / 100.0,
+                        "quality": scored.weighted_total / 100.0,
+                        "feedback": scored.scores.reasoning
+                    }
+                else:
+                    raise RuntimeError("VLM scoring failed: no results returned")
+
+        self.logger.info("Using real VLM client for scoring")
+        return VLMClientWrapper(real_client)
+
     def process(self, request: VLMScoreRequest) -> VLMScoreResult:
         """
         对图像进行评分
@@ -418,18 +456,17 @@ class VLMScorer(PipelineComponent):
 class VideoGenerator(PipelineComponent):
     """
     图生视频生成器
-    
-    将静态关键帧转换为动态视频片段
+
+    将静态关键帧转换为动态视频片段。
+    所有生成的视频强制上传到 OSS。
     """
-    
+
     def __init__(
         self,
-        video_generator: Optional[VideoGeneratorProtocol] = None,
-        output_dir: Optional[str] = None
+        video_generator: Optional[VideoGeneratorProtocol] = None
     ):
         super().__init__("VideoGenerator")
         self._video_generator = video_generator
-        self._output_dir = output_dir or settings.OUTPUT_DIR
 
         if self._video_generator is None:
             from integrations.provider_factory import ProviderFactory
@@ -447,7 +484,7 @@ class VideoGenerator(PipelineComponent):
 
         Raises:
             FileNotFoundError: 输入图像不存在
-            RuntimeError: 视频生成失败
+            RuntimeError: 视频生成失败或 OSS 上传失败
         """
         self.logger.info(f"Generating video for shot {request.shot_id}")
         self.logger.info(f"  image_path: {request.image_path}")
@@ -469,7 +506,6 @@ class VideoGenerator(PipelineComponent):
             motion_prompt = f"{motion_prompt or ''}, {request.camera_movement}".strip(", ")
 
         # 调用视频生成器
-        # 如果有 URL，传递 URL；否则传递本地路径
         video_data = self._video_generator.generate_video(
             image_path=request.image_path if not request.image_url else request.image_path,
             image_url=request.image_url,
@@ -480,32 +516,30 @@ class VideoGenerator(PipelineComponent):
         if not video_data:
             raise RuntimeError(f"Failed to generate video for shot {request.shot_id}")
 
-        os.makedirs(self._output_dir, exist_ok=True)
-        video_path = os.path.join(
-            self._output_dir,
-            f"video_shot_{sanitize_filename(request.shot_id)}.mp4"
-        )
+        # 强制上传到 OSS
+        from integrations.oss_service import require_oss
+        oss = require_oss()
 
-        with open(video_path, "wb") as f:
-            f.write(video_data)
-
-        self.logger.info(f"Saved video: {video_path}")
+        filename = f"video_shot_{sanitize_filename(request.shot_id)}"
+        video_url = oss.upload_video_bytes(video_data, filename=filename)
+        self.logger.info(f"Video uploaded to OSS: {video_url}")
 
         return VideoGenResult(
             shot_id=request.shot_id,
-            video_path=video_path,
+            video_path=video_url,  # 现在存储的是 OSS URL
             duration=request.duration,
             metadata={
                 "source_image": request.image_url or request.image_path,
                 "motion_prompt": motion_prompt,
-                "camera_movement": request.camera_movement
+                "camera_movement": request.camera_movement,
+                "oss_url": video_url
             }
         )
-    
+
     def validate(self, request: VideoGenRequest) -> bool:
         """验证请求"""
-        if not request.image_path:
-            self.logger.error("Image path is required")
+        if not request.image_path and not request.image_url:
+            self.logger.error("Image path or URL is required")
             return False
         if request.duration <= 0:
             self.logger.error("Duration must be positive")
@@ -516,18 +550,17 @@ class VideoGenerator(PipelineComponent):
 class AudioGenerator(PipelineComponent):
     """
     TTS 音频生成器
-    
-    将文本对白转换为语音音频
+
+    将文本对白转换为语音音频。
+    所有生成的音频强制上传到 OSS。
     """
-    
+
     def __init__(
         self,
-        tts_client: Optional[TTSProtocol] = None,
-        output_dir: Optional[str] = None
+        tts_client: Optional[TTSProtocol] = None
     ):
         super().__init__("AudioGenerator")
         self._tts_client = tts_client
-        self._output_dir = output_dir or settings.OUTPUT_DIR
 
         if self._tts_client is None:
             from integrations.provider_factory import ProviderFactory
@@ -544,7 +577,7 @@ class AudioGenerator(PipelineComponent):
             TTS 音频生成结果
 
         Raises:
-            RuntimeError: 音频生成失败
+            RuntimeError: 音频生成失败或 OSS 上传失败
             ValueError: 无效的 speed 参数
         """
         # 验证 speed 参数，防止除零错误
@@ -562,41 +595,58 @@ class AudioGenerator(PipelineComponent):
         if not audio_data:
             raise RuntimeError(f"Failed to generate audio for shot {request.shot_id}")
 
-        os.makedirs(self._output_dir, exist_ok=True)
-
         # 检测音频格式
         ext = ".mp3"
-        if audio_data[:4] == b'RIFF':
-            ext = ".wav"
-        elif audio_data[:4] == b'fLaC':
-            ext = ".flac"
-        elif audio_data[:3] == b'OGG':
-            ext = ".ogg"
+        if len(audio_data) >= 4:
+            if audio_data[:4] == b'RIFF':
+                ext = ".wav"
+            elif audio_data[:4] == b'fLaC':
+                ext = ".flac"
+            elif audio_data[:3] == b'OGG':
+                ext = ".ogg"
 
-        audio_path = os.path.join(
-            self._output_dir,
-            f"audio_shot_{sanitize_filename(request.shot_id)}{ext}"
-        )
+        # 强制上传到 OSS
+        from integrations.oss_service import require_oss
+        oss = require_oss()
 
-        with open(audio_path, "wb") as f:
-            f.write(audio_data)
+        filename = f"audio_shot_{sanitize_filename(request.shot_id)}"
+        audio_url = oss.upload_audio_bytes(audio_data, filename=filename, ext=ext)
+        self.logger.info(f"Audio uploaded to OSS: {audio_url}")
 
-        estimated_duration = len(request.text) * 0.1 / request.speed
-
-        self.logger.info(f"Saved audio: {audio_path}")
+        # 获取精确的音频时长
+        # 需要先下载到临时文件来获取时长
+        actual_duration = self._get_audio_duration_from_bytes(audio_data, ext)
+        self.logger.info(f"Audio duration: {actual_duration:.2f}s")
 
         return AudioGenResult(
             shot_id=request.shot_id,
-            audio_path=audio_path,
-            duration=estimated_duration,
+            audio_path=audio_url,  # 现在存储的是 OSS URL
+            duration=actual_duration,
             metadata={
                 "text": request.text,
                 "voice_id": request.voice_id,
                 "language": request.language,
-                "speed": request.speed
+                "speed": request.speed,
+                "oss_url": audio_url
             }
         )
-    
+
+    def _get_audio_duration_from_bytes(self, audio_data: bytes, ext: str) -> float:
+        """从音频字节数据获取时长"""
+        import tempfile
+        temp_file = None
+        try:
+            temp_file = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+            temp_file.write(audio_data)
+            temp_file.close()
+            return get_audio_duration(temp_file.name)
+        finally:
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                except Exception:
+                    pass
+
     def validate(self, request: AudioGenRequest) -> bool:
         """验证请求"""
         if not request.text:
@@ -611,14 +661,14 @@ class AudioGenerator(PipelineComponent):
 class ShotAligner(PipelineComponent):
     """
     音视频对齐器
-    
-    将视频和音频对齐到相同时长
+
+    将视频和音频对齐到相同时长。
+    支持从 OSS URL 下载文件，处理后上传结果到 OSS。
     """
-    
-    def __init__(self, output_dir: Optional[str] = None):
+
+    def __init__(self):
         super().__init__("ShotAligner")
-        self._output_dir = output_dir or settings.OUTPUT_DIR
-    
+
     def process(self, request: AlignmentRequest) -> AlignmentResult:
         """
         对齐音视频
@@ -631,23 +681,26 @@ class ShotAligner(PipelineComponent):
 
         Raises:
             FileNotFoundError: 输入文件不存在
+            RuntimeError: OSS 上传失败
         """
         from moviepy import VideoFileClip, AudioFileClip
         from moviepy.video.fx import Loop
+        import tempfile
 
         self.logger.info(f"Aligning shot {request.shot_id}")
 
-        if not os.path.exists(request.video_path):
-            raise FileNotFoundError(f"Video not found: {request.video_path}")
-        if not os.path.exists(request.audio_path):
-            raise FileNotFoundError(f"Audio not found: {request.audio_path}")
+        # 处理视频路径（可能是 OSS URL）
+        video_path = self._resolve_path(request.video_path, "video")
+        audio_path = self._resolve_path(request.audio_path, "audio")
 
         video = None
         audio = None
+        temp_output = None
+        temp_files = []
 
         try:
-            video = VideoFileClip(request.video_path)
-            audio = AudioFileClip(request.audio_path)
+            video = VideoFileClip(video_path)
+            audio = AudioFileClip(audio_path)
 
             video_duration = video.duration
             audio_duration = audio.duration
@@ -672,25 +725,30 @@ class ShotAligner(PipelineComponent):
             video = video.with_audio(audio)
             final_duration = video.duration
 
-            os.makedirs(self._output_dir, exist_ok=True)
-            output_path = os.path.join(
-                self._output_dir,
-                f"aligned_shot_{request.shot_id}.mp4"
-            )
+            # 写入临时文件
+            temp_output = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            temp_output.close()
+            temp_files.append(temp_output.name)
 
             video.write_videofile(
-                output_path,
+                temp_output.name,
                 fps=24,
                 codec="libx264",
                 audio_codec="aac",
                 logger=None
             )
 
-            self.logger.info(f"Aligned shot saved: {output_path} ({final_duration:.2f}s)")
+            # 上传到 OSS
+            from integrations.oss_service import require_oss
+            oss = require_oss()
+
+            filename = f"aligned_shot_{sanitize_filename(request.shot_id)}"
+            output_url = oss.upload_file(temp_output.name, folder="videos")
+            self.logger.info(f"Aligned shot uploaded to OSS: {output_url}")
 
             return AlignmentResult(
                 shot_id=request.shot_id,
-                output_path=output_path,
+                output_path=output_url,  # 现在存储的是 OSS URL
                 final_duration=final_duration,
                 strategy_used=request.strategy
             )
@@ -705,7 +763,45 @@ class ShotAligner(PipelineComponent):
                     audio.close()
                 except Exception:
                     pass
-    
+            # 清理临时文件
+            for temp_file in temp_files:
+                if os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except Exception:
+                        pass
+            # 如果下载了临时文件，也要清理
+            if video_path != request.video_path and os.path.exists(video_path):
+                try:
+                    os.unlink(video_path)
+                except Exception:
+                    pass
+            if audio_path != request.audio_path and os.path.exists(audio_path):
+                try:
+                    os.unlink(audio_path)
+                except Exception:
+                    pass
+
+    def _resolve_path(self, path: str, file_type: str) -> str:
+        """
+        解析路径，如果是 OSS URL 则下载到临时文件
+
+        Args:
+            path: 文件路径或 OSS URL
+            file_type: 文件类型（用于日志）
+
+        Returns:
+            本地文件路径
+        """
+        if path.startswith("http://") or path.startswith("https://"):
+            self.logger.info(f"Downloading {file_type} from OSS: {path}")
+            from integrations.oss_service import OSSService
+            return OSSService.get_instance().download_to_temp(path)
+        else:
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"{file_type.capitalize()} not found: {path}")
+            return path
+
     def validate(self, request: AlignmentRequest) -> bool:
         """验证请求"""
         if not request.video_path or not request.audio_path:
@@ -721,11 +817,17 @@ class ShotAligner(PipelineComponent):
 
 class ShotPipeline:
     """
-    镜头处理流水线
-    
-    编排关键帧生成、评分、视频生成、音频生成和对齐的完整流程
+    镜头处理流水线 (Audio-First Pipeline)
+
+    采用"音频优先"策略：
+    1. 先生成 TTS 音频，获取精确时长
+    2. 根据音频时长规划视频生成策略
+    3. 生成关键帧和视频
+    4. 对齐音视频
+
+    支持角色一致性：通过 CharacterRegistry 管理角色参考图和标签。
     """
-    
+
     def __init__(
         self,
         keyframe_generator: Optional[KeyframeGenerator] = None,
@@ -733,6 +835,8 @@ class ShotPipeline:
         video_generator: Optional[VideoGenerator] = None,
         audio_generator: Optional[AudioGenerator] = None,
         shot_aligner: Optional[ShotAligner] = None,
+        duration_planner: Optional[DurationPlanner] = None,
+        character_registry: Optional[CharacterRegistry] = None,
         enable_vlm_scoring: bool = False,
         min_vlm_score: float = 0.7,
         max_keyframe_retries: int = 3
@@ -742,13 +846,15 @@ class ShotPipeline:
         self.video_generator = video_generator or VideoGenerator()
         self.audio_generator = audio_generator or AudioGenerator()
         self.shot_aligner = shot_aligner or ShotAligner()
-        
+        self.duration_planner = duration_planner or DurationPlanner()
+        self.character_registry = character_registry  # 可选，不自动创建
+
         self.enable_vlm_scoring = enable_vlm_scoring
         self.min_vlm_score = min_vlm_score
         self.max_keyframe_retries = max_keyframe_retries
-        
+
         self.logger = logging.getLogger(f"{__name__}.ShotPipeline")
-    
+
     def process_shot(
         self,
         shot_id: int,
@@ -758,65 +864,146 @@ class ShotPipeline:
         camera_movement: Optional[str] = None,
         voice_id: Optional[str] = None,
         target_duration: float = 4.0,
-        alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP
+        alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP,
+        character_ids: Optional[List[str]] = None
     ) -> ShotArtifact:
         """
-        处理单个镜头的完整流水线
-        
+        处理单个镜头的完整流水线 (Audio-First)
+
+        执行顺序：
+        1. 如果有对白，先生成音频获取精确时长
+        2. 根据音频时长（或 target_duration）规划视频时长
+        3. 生成关键帧（支持角色参考图注入）
+        4. 按规划时长生成视频
+        5. 对齐音视频（如有需要）
+
         Args:
             shot_id: 镜头 ID
             visual_prompt: 视觉提示词
             dialogue: 对白文本（可选）
-            reference_image_path: 参考图像路径（可选）
+            reference_image_path: 参考图像路径（可选，会被角色参考图覆盖）
             camera_movement: 相机运动（可选）
-            voice_id: 语音 ID（可选）
-            target_duration: 目标时长
+            voice_id: 语音 ID（可选，会被角色语音 ID 覆盖）
+            target_duration: 目标时长（无对白时使用）
             alignment_strategy: 对齐策略
-            
+            character_ids: 出场角色 ID 列表（可选）
+
         Returns:
             镜头产出物
         """
-        self.logger.info(f"Processing shot {shot_id}")
-        
-        keyframe_result = self._generate_keyframe_with_retry(
-            shot_id=shot_id,
-            prompt=visual_prompt,
-            reference_image_path=reference_image_path
-        )
-        
-        video_result = self.video_generator.process(VideoGenRequest(
-            shot_id=shot_id,
-            image_path=keyframe_result.image_path,
-            image_url=keyframe_result.image_url,
-            motion_prompt=visual_prompt,
-            camera_movement=camera_movement,
-            duration=target_duration
-        ))
-        
+        self.logger.info(f"Processing shot {shot_id} (Audio-First Pipeline)")
+
+        # ========== 角色一致性处理 ==========
+        effective_reference_image = reference_image_path
+        effective_voice_id = voice_id
+        character_tags: List[str] = []
+
+        if character_ids and self.character_registry:
+            self.logger.info(f"Processing with characters: {character_ids}")
+
+            # 获取第一个角色的参考图（如果未指定）
+            if not effective_reference_image and character_ids:
+                first_char = self.character_registry.get(character_ids[0])
+                if first_char:
+                    effective_reference_image = self.character_registry.get_reference_for_shot(
+                        character_ids[0]
+                    )
+                    if effective_reference_image:
+                        self.logger.info(f"Using character reference: {effective_reference_image}")
+
+                    # 使用角色的语音 ID
+                    if not effective_voice_id and first_char.voice_id:
+                        effective_voice_id = first_char.voice_id
+                        self.logger.info(f"Using character voice: {effective_voice_id}")
+
+            # 获取所有角色的标签
+            positive_tags, negative_tags = self.character_registry.get_combined_tags_for_shot(
+                character_ids
+            )
+            character_tags = positive_tags
+
+        # ========== Step 1: 音频生成（如有对白）==========
         audio_path: Optional[str] = None
         audio_duration: float = 0.0
-        
+        duration_plan: Optional[DurationPlan] = None
+
         if dialogue:
+            self.logger.info(f"[Step 1/4] Generating audio for dialogue...")
             audio_result = self.audio_generator.process(AudioGenRequest(
                 shot_id=shot_id,
                 text=dialogue,
-                voice_id=voice_id
+                voice_id=effective_voice_id
             ))
             audio_path = audio_result.audio_path
             audio_duration = audio_result.duration
-            
+            self.logger.info(f"Audio generated: {audio_duration:.2f}s")
+
+            # ========== Step 2: 时长规划 ==========
+            self.logger.info(f"[Step 2/4] Planning video duration based on audio...")
+            duration_plan = self.duration_planner.plan(audio_duration)
+            planned_video_duration = duration_plan.target_video_duration
+            self.logger.info(
+                f"Duration plan: audio={audio_duration:.2f}s -> "
+                f"video={planned_video_duration:.2f}s "
+                f"(segments={duration_plan.video_segments})"
+            )
+        else:
+            self.logger.info(f"[Step 1/4] No dialogue, using target_duration={target_duration}s")
+            duration_plan = self.duration_planner.plan_for_no_dialogue(target_duration)
+            planned_video_duration = duration_plan.target_video_duration
+
+        # ========== Step 3: 关键帧生成 ==========
+        self.logger.info(f"[Step 3/4] Generating keyframe...")
+
+        # 构建增强的提示词（包含角色标签）
+        enhanced_prompt = visual_prompt
+        if character_tags:
+            enhanced_prompt = f"{', '.join(character_tags)}, {visual_prompt}"
+
+        keyframe_result = self._generate_keyframe_with_retry(
+            shot_id=shot_id,
+            prompt=enhanced_prompt,
+            reference_image_path=effective_reference_image
+        )
+
+        # ========== Step 4: 视频生成 ==========
+        self.logger.info(f"[Step 4/4] Generating video (duration={planned_video_duration:.2f}s)...")
+
+        if duration_plan.video_segments == 1:
+            # 单段视频
+            video_result = self.video_generator.process(VideoGenRequest(
+                shot_id=shot_id,
+                image_path=keyframe_result.image_path,
+                image_url=keyframe_result.image_url,
+                motion_prompt=visual_prompt,
+                camera_movement=camera_movement,
+                duration=planned_video_duration
+            ))
+            final_video_path = video_result.video_path
+        else:
+            # 多段视频拼接
+            final_video_path = self._generate_multi_segment_video(
+                shot_id=shot_id,
+                keyframe_result=keyframe_result,
+                visual_prompt=visual_prompt,
+                camera_movement=camera_movement,
+                duration_plan=duration_plan
+            )
+
+        # ========== Step 5: 音视频对齐（如有音频）==========
+        if audio_path:
+            self.logger.info(f"Aligning audio and video...")
             alignment_result = self.shot_aligner.process(AlignmentRequest(
                 shot_id=shot_id,
-                video_path=video_result.video_path,
+                video_path=final_video_path,
                 audio_path=audio_path,
                 strategy=alignment_strategy
             ))
             final_video_path = alignment_result.output_path
             final_duration = alignment_result.final_duration
         else:
-            final_video_path = video_result.video_path
-            final_duration = video_result.duration
-        
+            final_duration = planned_video_duration
+
         artifact = ShotArtifact(
             shot_id=shot_id,
             video_path=final_video_path,
@@ -825,10 +1012,81 @@ class ShotPipeline:
             start_time=0.0,
             end_time=final_duration
         )
-        
+
         self.logger.info(f"Shot {shot_id} processed successfully: {final_duration:.2f}s")
-        
+
         return artifact
+
+    def _generate_multi_segment_video(
+        self,
+        shot_id: int,
+        keyframe_result: KeyframeResult,
+        visual_prompt: str,
+        camera_movement: Optional[str],
+        duration_plan: DurationPlan
+    ) -> str:
+        """
+        生成多段视频并拼接
+
+        当音频时长超过单次视频生成上限时，需要生成多段视频后拼接。
+
+        Args:
+            shot_id: 镜头 ID
+            keyframe_result: 关键帧结果
+            visual_prompt: 视觉提示词
+            camera_movement: 相机运动
+            duration_plan: 时长规划
+
+        Returns:
+            拼接后的视频路径
+        """
+        from moviepy import VideoFileClip, concatenate_videoclips
+
+        self.logger.info(
+            f"Generating {duration_plan.video_segments} video segments "
+            f"(each {duration_plan.segment_duration:.2f}s)"
+        )
+
+        segment_paths: List[str] = []
+
+        for i in range(duration_plan.video_segments):
+            segment_id = f"{shot_id}_seg{i}"
+            self.logger.info(f"Generating segment {i + 1}/{duration_plan.video_segments}...")
+
+            video_result = self.video_generator.process(VideoGenRequest(
+                shot_id=segment_id,
+                image_path=keyframe_result.image_path,
+                image_url=keyframe_result.image_url,
+                motion_prompt=visual_prompt,
+                camera_movement=camera_movement,
+                duration=duration_plan.segment_duration
+            ))
+            segment_paths.append(video_result.video_path)
+
+        # 拼接视频
+        self.logger.info(f"Concatenating {len(segment_paths)} video segments...")
+        clips = [VideoFileClip(path) for path in segment_paths]
+
+        try:
+            final_clip = concatenate_videoclips(clips, method="compose")
+            output_path = os.path.join(
+                settings.OUTPUT_DIR,
+                f"video_shot_{sanitize_filename(shot_id)}_combined.mp4"
+            )
+            final_clip.write_videofile(
+                output_path,
+                fps=24,
+                codec="libx264",
+                logger=None
+            )
+            self.logger.info(f"Combined video saved: {output_path}")
+            return output_path
+        finally:
+            for clip in clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
     
     def _generate_keyframe_with_retry(
         self,

@@ -42,43 +42,35 @@ class VLMClient:
         self,
         provider: Optional[str] = None,
         model: Optional[str] = None,
-        mock_mode: Optional[bool] = None,
     ):
-        """初始化 VLM 客户端。"""
+        """初始化 VLM 客户端（不支持 Mock 模式）。"""
         self.provider = provider or settings.VLM_BACKEND
         self.model = model or settings.VLM_MODEL
-        self._mock_mode = mock_mode
         self._client = None
 
-        if not self._is_mock_mode():
-            self._init_client()
-
-    def _is_mock_mode(self) -> bool:
-        """检查是否为模拟模式。"""
-        if self._mock_mode is not None:
-            return self._mock_mode
-
-        if self.provider == "openai":
-            import os
-            return not os.getenv("OPENAI_API_KEY")
-        return not settings.GOOGLE_API_KEY
+        self._init_client()
 
     def _init_client(self) -> None:
         """初始化 VLM 客户端。"""
-        try:
-            if self.provider == "openai":
-                from openai import OpenAI
-                self._client = OpenAI()
-            else:
-                from langchain_google_genai import ChatGoogleGenerativeAI
-                self._client = ChatGoogleGenerativeAI(
-                    google_api_key=settings.GOOGLE_API_KEY,
-                    model=self.model,
-                    temperature=0.2,
+        if self.provider == "openai":
+            import os
+            if not os.getenv("OPENAI_API_KEY") and not settings.OPENAI_API_KEY:
+                raise RuntimeError(
+                    "OpenAI API Key 未配置。请在 .env 中设置 OPENAI_API_KEY"
                 )
-        except Exception as e:
-            logger.warning(f"Failed to initialize VLM client: {e}. Falling back to mock mode.")
-            self._mock_mode = True
+            from openai import OpenAI
+            self._client = OpenAI()
+        else:
+            if not settings.GOOGLE_API_KEY:
+                raise RuntimeError(
+                    "Google API Key 未配置。请在 .env 中设置 GOOGLE_API_KEY"
+                )
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            self._client = ChatGoogleGenerativeAI(
+                google_api_key=settings.GOOGLE_API_KEY,
+                model=self.model,
+                temperature=0.2,
+            )
 
     def _encode_image(self, image_path: str) -> str:
         """将图像编码为 base64。"""
@@ -214,18 +206,6 @@ Only return the JSON, no other text."""
 
         return self._parse_score_response(response.choices[0].message.content)
 
-    def _generate_mock_scores(self, candidate_id: str) -> Dict[str, Any]:
-        """生成测试用的模拟分数。"""
-        import random
-        random.seed(hash(candidate_id) % 2**32)
-
-        return {
-            "prompt_match_score": random.randint(60, 95),
-            "character_consistency_score": random.randint(55, 90),
-            "composition_score": random.randint(65, 92),
-            "reasoning": f"[MOCK] Auto-generated scores for candidate {candidate_id}",
-        }
-
     def _calculate_weighted_total(self, scores: ScoreDetails) -> float:
         """计算加权总分。"""
         return (
@@ -240,7 +220,7 @@ Only return the JSON, no other text."""
         scene_description: str,
         characters: List[Dict[str, Any]],
     ) -> List[ScoredCandidate]:
-        """对多个关键帧候选进行评分。"""
+        """对多个关键帧候选进行评分（真实 API 调用）。"""
         prompt = self._build_scoring_prompt(scene_description, characters)
         results: List[ScoredCandidate] = []
 
@@ -249,15 +229,11 @@ Only return the JSON, no other text."""
             image_path = candidate.get("image_path", "")
 
             try:
-                if self._is_mock_mode():
-                    logger.info(f"[MOCK] Scoring candidate: {candidate_id}")
-                    raw_scores = self._generate_mock_scores(candidate_id)
+                logger.info(f"Scoring candidate: {candidate_id} with {self.provider}")
+                if self.provider == "openai":
+                    raw_scores = self._score_single_openai(image_path, prompt)
                 else:
-                    logger.info(f"Scoring candidate: {candidate_id} with {self.provider}")
-                    if self.provider == "openai":
-                        raw_scores = self._score_single_openai(image_path, prompt)
-                    else:
-                        raw_scores = self._score_single_gemini(image_path, prompt)
+                    raw_scores = self._score_single_gemini(image_path, prompt)
 
                 scores = ScoreDetails(
                     prompt_match_score=float(raw_scores.get("prompt_match_score", 0)),
@@ -277,18 +253,10 @@ Only return the JSON, no other text."""
 
             except FileNotFoundError as e:
                 logger.error(f"Image not found for candidate {candidate_id}: {e}")
-                results.append(ScoredCandidate(
-                    candidate_id=candidate_id,
-                    image_path=image_path,
-                    weighted_total=0.0,
-                ))
+                raise
             except Exception as e:
                 logger.error(f"Error scoring candidate {candidate_id}: {e}")
-                results.append(ScoredCandidate(
-                    candidate_id=candidate_id,
-                    image_path=image_path,
-                    weighted_total=0.0,
-                ))
+                raise
 
         results.sort(key=lambda x: x.weighted_total, reverse=True)
         return results
