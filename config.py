@@ -133,11 +133,28 @@ class Settings(BaseSettings):
     IMAGE_PROVIDER: str = "google"  # google, aliyun, replicate
     VIDEO_PROVIDER: str = "google"  # google, replicate, volcengine, aliyun
     LLM_PROVIDER: str = "google"    # google, deepseek, doubao, openai
-    
+
     # 备用 Provider 列表
     BACKUP_IMAGE_PROVIDERS: str = "aliyun,replicate"
     BACKUP_VIDEO_PROVIDERS: str = "volcengine,replicate,aliyun"
     BACKUP_LLM_PROVIDERS: str = "deepseek,doubao"
+
+    # ========== Lip-Sync Settings ==========
+    LIPSYNC_ENABLED: bool = True  # 是否启用口型同步
+    LIPSYNC_PROVIDER: str = "sadtalker"  # sadtalker, musetalk, liveportrait, wav2lip
+    SADTALKER_API_URL: str = ""  # SadTalker API URL (如果不使用 Replicate)
+    MUSETALK_API_URL: str = ""  # MuseTalk API URL
+    LIVEPORTRAIT_API_URL: str = ""  # LivePortrait API URL
+    WAV2LIP_API_URL: str = ""  # Wav2Lip API URL
+
+    # ========== Frame Interpolation Settings ==========
+    FRAME_INTERPOLATION_ENABLED: bool = True  # 是否启用帧插值
+    FRAME_INTERPOLATION_METHOD: str = "rife"  # rife, film, simple
+    RIFE_API_URL: str = ""  # RIFE API URL (如果不使用 Replicate)
+    FILM_API_URL: str = ""  # FILM API URL
+
+    # ========== Alignment Strategy Settings ==========
+    DEFAULT_ALIGNMENT_STRATEGY: str = "smooth_slow_motion"  # slow_motion, loop, smooth_slow_motion, freeze_frame, extend
 
     model_config = SettingsConfigDict(
         env_file=".env",

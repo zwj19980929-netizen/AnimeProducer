@@ -138,6 +138,26 @@ class AlignmentResult:
     strategy_used: AlignmentStrategy
 
 
+@dataclass
+class LipSyncRequest:
+    """Lip-Sync 请求"""
+    shot_id: int
+    video_path: str  # 输入视频路径或 URL
+    audio_path: str  # 音频路径或 URL
+    face_enhance: bool = True
+    expression_scale: float = 1.0
+
+
+@dataclass
+class LipSyncResult:
+    """Lip-Sync 结果"""
+    shot_id: int
+    video_path: str  # 输出视频路径或 URL
+    duration: float
+    provider: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
 # ============================================================================
 # 抽象接口定义
 # ============================================================================
@@ -848,6 +868,115 @@ class ShotAligner(PipelineComponent):
         return True
 
 
+class LipSyncProcessor(PipelineComponent):
+    """
+    Lip-Sync 处理器
+
+    使用音频驱动人像动画技术，根据 TTS 音频重绘视频中人物的嘴部动作。
+    支持 SadTalker, MuseTalk, LivePortrait, Wav2Lip 等技术。
+    """
+
+    def __init__(
+        self,
+        provider: str = "sadtalker",
+        enabled: bool = True
+    ):
+        super().__init__("LipSyncProcessor")
+        self.provider = provider
+        self.enabled = enabled
+        self._client = None
+
+    def _get_client(self):
+        """获取 Lip-Sync 客户端"""
+        if self._client is None:
+            from integrations.lipsync_client import LipSyncClientFactory, LipSyncProvider
+            try:
+                provider_enum = LipSyncProvider(self.provider.lower())
+            except ValueError:
+                self.logger.warning(f"Unknown provider: {self.provider}, using sadtalker")
+                provider_enum = LipSyncProvider.SADTALKER
+            self._client = LipSyncClientFactory.get_client(provider_enum)
+        return self._client
+
+    def process(self, request: LipSyncRequest) -> LipSyncResult:
+        """
+        处理 Lip-Sync 请求
+
+        Args:
+            request: Lip-Sync 请求
+
+        Returns:
+            LipSyncResult: 处理结果
+        """
+        if not self.enabled:
+            self.logger.info("Lip-Sync is disabled, returning original video")
+            return LipSyncResult(
+                shot_id=request.shot_id,
+                video_path=request.video_path,
+                duration=0,
+                provider="none",
+                metadata={"skipped": True}
+            )
+
+        self.logger.info(f"Processing lip-sync for shot {request.shot_id}")
+        self.logger.info(f"  Provider: {self.provider}")
+        self.logger.info(f"  Video: {request.video_path}")
+        self.logger.info(f"  Audio: {request.audio_path}")
+
+        try:
+            from integrations.lipsync_client import LipSyncRequest as ClientRequest
+
+            client = self._get_client()
+            client_request = ClientRequest(
+                video_path=request.video_path,
+                audio_path=request.audio_path,
+                face_enhance=request.face_enhance,
+                expression_scale=request.expression_scale,
+            )
+
+            result = client.process(client_request)
+
+            # 上传到 OSS
+            from integrations.oss_service import is_oss_configured, require_oss
+
+            if is_oss_configured() and not result.video_path.startswith("http"):
+                oss = require_oss()
+                video_url = oss.upload_file(result.video_path, folder="videos")
+                self.logger.info(f"Lip-synced video uploaded to OSS: {video_url}")
+                output_path = video_url
+            else:
+                output_path = result.video_path
+
+            return LipSyncResult(
+                shot_id=request.shot_id,
+                video_path=output_path,
+                duration=result.duration,
+                provider=result.provider,
+                metadata=result.metadata or {}
+            )
+
+        except Exception as e:
+            self.logger.error(f"Lip-sync processing failed: {e}")
+            self.logger.warning("Returning original video without lip-sync")
+            return LipSyncResult(
+                shot_id=request.shot_id,
+                video_path=request.video_path,
+                duration=0,
+                provider="none",
+                metadata={"error": str(e)}
+            )
+
+    def validate(self, request: LipSyncRequest) -> bool:
+        """验证请求"""
+        if not request.video_path:
+            self.logger.error("Video path is required")
+            return False
+        if not request.audio_path:
+            self.logger.error("Audio path is required")
+            return False
+        return True
+
+
 # ============================================================================
 # 流水线编排器
 # ============================================================================
@@ -860,10 +989,12 @@ class ShotPipeline:
     采用"音频优先"策略：
     1. 先生成 TTS 音频，获取精确时长
     2. 根据音频时长规划视频生成策略
-    3. 生成关键帧和视频
-    4. 对齐音视频
+    3. ��成关键帧和视频
+    4. 应用 Lip-Sync 口型同步
+    5. 对齐音视频
 
     支持角色一致性：通过 CharacterRegistry 管理角色参考图和标签。
+    支持镜头连续性：通过 Scene Context 保持镜头间的空间连续性。
     """
 
     def __init__(
@@ -873,9 +1004,12 @@ class ShotPipeline:
         video_generator: Optional[VideoGenerator] = None,
         audio_generator: Optional[AudioGenerator] = None,
         shot_aligner: Optional[ShotAligner] = None,
+        lipsync_processor: Optional[LipSyncProcessor] = None,
         duration_planner: Optional[DurationPlanner] = None,
         character_registry: Optional[CharacterRegistry] = None,
         enable_vlm_scoring: bool = False,
+        enable_lipsync: bool = True,
+        lipsync_provider: str = "sadtalker",
         min_vlm_score: float = 0.7,
         max_keyframe_retries: int = 3
     ):
@@ -884,12 +1018,20 @@ class ShotPipeline:
         self.video_generator = video_generator or VideoGenerator()
         self.audio_generator = audio_generator or AudioGenerator()
         self.shot_aligner = shot_aligner or ShotAligner()
+        self.lipsync_processor = lipsync_processor or LipSyncProcessor(
+            provider=lipsync_provider,
+            enabled=enable_lipsync
+        )
         self.duration_planner = duration_planner or DurationPlanner()
         self.character_registry = character_registry  # 可选，不自动创建
 
         self.enable_vlm_scoring = enable_vlm_scoring
+        self.enable_lipsync = enable_lipsync
         self.min_vlm_score = min_vlm_score
         self.max_keyframe_retries = max_keyframe_retries
+
+        # 镜头连续性：存储上一个镜头的最后一帧
+        self._last_frame_cache: Dict[str, str] = {}  # scene_id -> last_frame_path
 
         self.logger = logging.getLogger(f"{__name__}.ShotPipeline")
 
@@ -907,6 +1049,11 @@ class ShotPipeline:
         # 情感参数
         emotion: Optional[str] = None,
         emotion_intensity: float = 0.5,
+        # 镜头连续性参数
+        scene_id: Optional[str] = None,
+        previous_frame_path: Optional[str] = None,
+        # Lip-Sync 参数
+        enable_lipsync: Optional[bool] = None,
     ) -> ShotArtifact:
         """
         处理单个镜头的完整流水线 (Audio-First)
@@ -914,9 +1061,10 @@ class ShotPipeline:
         执行顺序：
         1. 如果有对白，先生成音频获取精确时长
         2. 根据音频时长（或 target_duration）规划视频时长
-        3. 生成关键帧（支持角色参考图注入）
+        3. 生成关键帧（支持角色参考图注入和镜头连续性）
         4. 按规划时长生成视频
-        5. 对齐音视频（如有需要）
+        5. 应用 Lip-Sync 口型同步（如有对白）
+        6. 对齐音视频（如有需要）
 
         Args:
             shot_id: 镜头 ID
@@ -930,11 +1078,25 @@ class ShotPipeline:
             character_ids: 出场角色 ID 列表（可选）
             emotion: 镜头情感（可选，如未提供则从对白分析）
             emotion_intensity: 情感强度 0-1
+            scene_id: 场景 ID（用于镜头连续性）
+            previous_frame_path: 上一镜头的最后一帧（用于镜头连续性）
+            enable_lipsync: 是否启用 Lip-Sync（默认使用全局设置）
 
         Returns:
             镜头产出物
         """
         self.logger.info(f"Processing shot {shot_id} (Audio-First Pipeline)")
+
+        # 确定是否启用 Lip-Sync
+        use_lipsync = enable_lipsync if enable_lipsync is not None else self.enable_lipsync
+
+        # ========== 镜头连续性处理 ==========
+        # 如果提供了 scene_id，尝试获取上一镜头的最后一帧
+        continuity_reference = previous_frame_path
+        if scene_id and not continuity_reference:
+            continuity_reference = self._last_frame_cache.get(scene_id)
+            if continuity_reference:
+                self.logger.info(f"Using scene context from previous shot: {continuity_reference}")
 
         # ========== 情感分析 ==========
         effective_emotion = emotion
@@ -1018,7 +1180,7 @@ class ShotPipeline:
             planned_video_duration = duration_plan.target_video_duration
 
         # ========== Step 3: 关键帧生成 ==========
-        self.logger.info(f"[Step 3/4] Generating keyframe...")
+        self.logger.info(f"[Step 3/6] Generating keyframe...")
 
         # 构建增强的提示词（包含角色标签和情感标签）
         enhanced_prompt = visual_prompt
@@ -1035,14 +1197,17 @@ class ShotPipeline:
             )
             self.logger.info(f"Enhanced prompt with emotion tags: {enhanced_prompt[:100]}...")
 
+        # 镜头连续性：优先使用上一镜头的最后一帧作为参考
+        keyframe_reference = continuity_reference or effective_reference_image
+
         keyframe_result = self._generate_keyframe_with_retry(
             shot_id=shot_id,
             prompt=enhanced_prompt,
-            reference_image_path=effective_reference_image
+            reference_image_path=keyframe_reference
         )
 
         # ========== Step 4: 视频生成 ==========
-        self.logger.info(f"[Step 4/4] Generating video (duration={planned_video_duration:.2f}s)...")
+        self.logger.info(f"[Step 4/6] Generating video (duration={planned_video_duration:.2f}s)...")
 
         if duration_plan.video_segments == 1:
             # 单段视频
@@ -1065,9 +1230,28 @@ class ShotPipeline:
                 duration_plan=duration_plan
             )
 
-        # ========== Step 5: 音视频对齐（如有音频）==========
+        # ========== Step 5: Lip-Sync 口型同步（如有对白）==========
+        if dialogue and audio_path and use_lipsync:
+            self.logger.info(f"[Step 5/6] Applying lip-sync...")
+            try:
+                lipsync_result = self.lipsync_processor.process(LipSyncRequest(
+                    shot_id=shot_id,
+                    video_path=final_video_path,
+                    audio_path=audio_path,
+                    face_enhance=True,
+                    expression_scale=1.0 + (effective_emotion_intensity * 0.3),  # 根据情感强度调整表情幅度
+                ))
+                if lipsync_result.video_path != final_video_path:
+                    final_video_path = lipsync_result.video_path
+                    self.logger.info(f"Lip-sync applied successfully")
+            except Exception as e:
+                self.logger.warning(f"Lip-sync failed: {e}, continuing without lip-sync")
+        else:
+            self.logger.info(f"[Step 5/6] Skipping lip-sync (no dialogue or disabled)")
+
+        # ========== Step 6: 音视频对齐（如有音频）==========
         if audio_path:
-            self.logger.info(f"Aligning audio and video...")
+            self.logger.info(f"[Step 6/6] Aligning audio and video...")
             alignment_result = self.shot_aligner.process(AlignmentRequest(
                 shot_id=shot_id,
                 video_path=final_video_path,
@@ -1078,6 +1262,16 @@ class ShotPipeline:
             final_duration = alignment_result.final_duration
         else:
             final_duration = planned_video_duration
+
+        # ========== 镜头连续性：缓存最后一帧 ==========
+        if scene_id:
+            try:
+                last_frame_path = self._extract_last_frame(final_video_path, shot_id)
+                if last_frame_path:
+                    self._last_frame_cache[scene_id] = last_frame_path
+                    self.logger.info(f"Cached last frame for scene {scene_id}: {last_frame_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to cache last frame: {e}")
 
         artifact = ShotArtifact(
             shot_id=shot_id,
@@ -1091,6 +1285,58 @@ class ShotPipeline:
         self.logger.info(f"Shot {shot_id} processed successfully: {final_duration:.2f}s")
 
         return artifact
+
+    def _extract_last_frame(self, video_path: str, shot_id: int) -> Optional[str]:
+        """
+        从视频中提取最后一帧，用于镜头连续性
+
+        Args:
+            video_path: 视频路径或 URL
+            shot_id: 镜头 ID
+
+        Returns:
+            最后一帧的路径（OSS URL 或本地路径）
+        """
+        from moviepy import VideoFileClip
+        import tempfile
+
+        # 解析视频路径
+        local_path = video_path
+        if video_path.startswith("http://") or video_path.startswith("https://"):
+            from integrations.oss_service import OSSService
+            local_path = OSSService.get_instance().download_to_temp(video_path)
+
+        clip = VideoFileClip(local_path)
+        try:
+            # 提取最后一帧
+            temp_frame = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            temp_frame.close()
+
+            # 获取最后一帧（稍微提前一点避免边界问题）
+            last_time = max(0, clip.duration - 0.05)
+            clip.save_frame(temp_frame.name, t=last_time)
+
+            # 上传到 OSS
+            from integrations.oss_service import is_oss_configured, require_oss
+            if is_oss_configured():
+                oss = require_oss()
+                frame_url = oss.upload_file(temp_frame.name, folder="frames")
+                # 清理临时文件
+                try:
+                    os.unlink(temp_frame.name)
+                except Exception:
+                    pass
+                return frame_url
+            else:
+                return temp_frame.name
+        finally:
+            clip.close()
+            # 清理下载的临时视频文件
+            if local_path != video_path and os.path.exists(local_path):
+                try:
+                    os.unlink(local_path)
+                except Exception:
+                    pass
 
     def _generate_multi_segment_video(
         self,
@@ -1249,21 +1495,35 @@ class ShotPipeline:
     def process_shots(
         self,
         shots: List[Dict[str, Any]],
-        alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP
+        alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP,
+        scene_id: Optional[str] = None,
+        enable_continuity: bool = True,
     ) -> List[ShotArtifact]:
         """
         批量处理镜头
-        
+
+        支持镜头连续性：同一场景内的镜头会自动使用上一镜头的最后一帧作为参考。
+
         Args:
             shots: 镜头配置列表
             alignment_strategy: 对齐策略
-            
+            scene_id: 场景 ID（用于镜头连续性）
+            enable_continuity: 是否启用镜头连续性
+
         Returns:
             镜头产出物列表
         """
         artifacts: List[ShotArtifact] = []
-        
-        for shot_config in shots:
+
+        for i, shot_config in enumerate(shots):
+            # 确定场景 ID
+            shot_scene_id = shot_config.get("scene_id", scene_id)
+
+            # 镜头连续性：获取上一镜头的最后一帧
+            previous_frame = None
+            if enable_continuity and i > 0 and shot_scene_id:
+                previous_frame = self._last_frame_cache.get(shot_scene_id)
+
             artifact = self.process_shot(
                 shot_id=shot_config["shot_id"],
                 visual_prompt=shot_config["visual_prompt"],
@@ -1272,8 +1532,29 @@ class ShotPipeline:
                 camera_movement=shot_config.get("camera_movement"),
                 voice_id=shot_config.get("voice_id"),
                 target_duration=shot_config.get("duration", 4.0),
-                alignment_strategy=alignment_strategy
+                alignment_strategy=alignment_strategy,
+                character_ids=shot_config.get("character_ids"),
+                emotion=shot_config.get("emotion"),
+                emotion_intensity=shot_config.get("emotion_intensity", 0.5),
+                scene_id=shot_scene_id,
+                previous_frame_path=previous_frame,
+                enable_lipsync=shot_config.get("enable_lipsync"),
             )
             artifacts.append(artifact)
-        
+
         return artifacts
+
+    def clear_scene_cache(self, scene_id: Optional[str] = None):
+        """
+        清除场景缓存
+
+        Args:
+            scene_id: 要清除的场景 ID，如果为 None 则清除所有缓存
+        """
+        if scene_id:
+            if scene_id in self._last_frame_cache:
+                del self._last_frame_cache[scene_id]
+                self.logger.info(f"Cleared scene cache for: {scene_id}")
+        else:
+            self._last_frame_cache.clear()
+            self.logger.info("Cleared all scene caches")

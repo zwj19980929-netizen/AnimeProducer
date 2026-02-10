@@ -430,6 +430,244 @@ class DialogueEmotionAnalyzer:
             return f"{visual_prompt}, {emotion_tags}"
         return visual_prompt
 
+    def analyze_emotion_transitions(
+        self,
+        dialogue: str,
+        context: str = "",
+    ) -> List[Dict]:
+        """
+        分析对白中的情绪转变
+
+        检测单段对白中的情绪动态变化，如"先笑后哭"。
+
+        Args:
+            dialogue: 对白文本
+            context: 上下文信息
+
+        Returns:
+            情绪转变列表，每个元素包含：
+            - start_ratio: 开始位置比例 (0-1)
+            - end_ratio: 结束位置比例 (0-1)
+            - emotion: 情感类型
+            - intensity: 情感强度
+        """
+        if not dialogue or not dialogue.strip():
+            return [{"start_ratio": 0, "end_ratio": 1, "emotion": "neutral", "intensity": 0.5}]
+
+        # 使用 LLM 分析情绪转变
+        if self.use_llm:
+            try:
+                return self._analyze_transitions_by_llm(dialogue, context)
+            except Exception as e:
+                logger.warning(f"LLM 情绪转变分析失败: {e}")
+
+        # 回退到简单分析
+        return self._analyze_transitions_simple(dialogue)
+
+    def _analyze_transitions_simple(self, dialogue: str) -> List[Dict]:
+        """简单的情绪转变分析"""
+        # 按标点符号分割对白
+        import re
+        segments = re.split(r'[。！？…]+', dialogue)
+        segments = [s.strip() for s in segments if s.strip()]
+
+        if len(segments) <= 1:
+            # 单段对白，返回整体情感
+            result = self.analyze(dialogue)
+            return [{
+                "start_ratio": 0,
+                "end_ratio": 1,
+                "emotion": result.emotion,
+                "intensity": result.intensity
+            }]
+
+        # 分析每段的情感
+        transitions = []
+        total_len = len(dialogue)
+        current_pos = 0
+
+        for segment in segments:
+            if not segment:
+                continue
+
+            start_pos = dialogue.find(segment, current_pos)
+            end_pos = start_pos + len(segment)
+
+            result = self._analyze_by_keywords(segment)
+
+            transitions.append({
+                "start_ratio": start_pos / total_len,
+                "end_ratio": end_pos / total_len,
+                "emotion": result.emotion,
+                "intensity": result.intensity
+            })
+
+            current_pos = end_pos
+
+        # 合并相邻的相同情感
+        merged = []
+        for t in transitions:
+            if merged and merged[-1]["emotion"] == t["emotion"]:
+                merged[-1]["end_ratio"] = t["end_ratio"]
+                merged[-1]["intensity"] = max(merged[-1]["intensity"], t["intensity"])
+            else:
+                merged.append(t)
+
+        return merged if merged else [{"start_ratio": 0, "end_ratio": 1, "emotion": "neutral", "intensity": 0.5}]
+
+    def _analyze_transitions_by_llm(self, dialogue: str, context: str) -> List[Dict]:
+        """使用 LLM 分析情绪转变"""
+        from integrations.llm_client import llm_client
+        from pydantic import BaseModel, Field
+        from typing import List as ListType
+
+        class EmotionSegment(BaseModel):
+            start_ratio: float = Field(ge=0, le=1, description="开始位置比例")
+            end_ratio: float = Field(ge=0, le=1, description="结束位置比例")
+            emotion: str = Field(description="情感类型")
+            intensity: float = Field(ge=0, le=1, description="情感强度")
+
+        class EmotionTransitions(BaseModel):
+            segments: ListType[EmotionSegment] = Field(description="情绪片段列表")
+
+        prompt = f"""分析以下对白中的情绪变化。
+
+对白: "{dialogue}"
+{f'上下文: {context}' if context else ''}
+
+请识别对白中的情绪转变点，返回 JSON 格式：
+{{
+    "segments": [
+        {{
+            "start_ratio": 0.0,  // 开始位置比例 (0-1)
+            "end_ratio": 0.5,    // 结束位置比例 (0-1)
+            "emotion": "happy",  // 情感类型
+            "intensity": 0.7     // 情感强度 (0-1)
+        }},
+        ...
+    ]
+}}
+
+情感类型: happy, sad, angry, fearful, surprised, excited, tense, neutral
+
+注意：
+- 如果对白情感单一，返回一个覆盖全部的片段
+- 如果有明显的情绪转变（如"先笑后哭"），分成多个片段
+- start_ratio 和 end_ratio 表示在对白中的位置比例
+
+只返回 JSON，不要其他内容。"""
+
+        try:
+            result = llm_client.generate_structured_output(
+                prompt,
+                EmotionTransitions,
+                temperature=0.1
+            )
+
+            if result and result.segments:
+                return [
+                    {
+                        "start_ratio": s.start_ratio,
+                        "end_ratio": s.end_ratio,
+                        "emotion": s.emotion if s.emotion in EMOTION_TYPES else "neutral",
+                        "intensity": s.intensity
+                    }
+                    for s in result.segments
+                ]
+        except Exception as e:
+            logger.error(f"LLM 情绪转变分析出错: {e}")
+
+        # 失败时返回简单分析结果
+        return self._analyze_transitions_simple(dialogue)
+
+    def get_liveportrait_params(
+        self,
+        emotion: str,
+        intensity: float,
+    ) -> Dict:
+        """
+        获取 LivePortrait 表情驱动参数
+
+        为 LivePortrait 等技术提供精确的表情控制参数。
+
+        Args:
+            emotion: 情感类型
+            intensity: 情感强度
+
+        Returns:
+            LivePortrait 参数字典
+        """
+        # 基础表情参数映射
+        EMOTION_LIVEPORTRAIT_PARAMS = {
+            "happy": {
+                "smile": 0.8,
+                "eyebrow_raise": 0.3,
+                "eye_open": 0.2,
+                "mouth_open": 0.4,
+            },
+            "sad": {
+                "smile": -0.5,
+                "eyebrow_raise": -0.3,
+                "eye_open": -0.2,
+                "mouth_open": 0.1,
+            },
+            "angry": {
+                "smile": -0.6,
+                "eyebrow_raise": -0.5,
+                "eye_open": 0.3,
+                "mouth_open": 0.3,
+            },
+            "fearful": {
+                "smile": -0.3,
+                "eyebrow_raise": 0.5,
+                "eye_open": 0.6,
+                "mouth_open": 0.4,
+            },
+            "surprised": {
+                "smile": 0.1,
+                "eyebrow_raise": 0.7,
+                "eye_open": 0.7,
+                "mouth_open": 0.6,
+            },
+            "excited": {
+                "smile": 0.7,
+                "eyebrow_raise": 0.4,
+                "eye_open": 0.4,
+                "mouth_open": 0.5,
+            },
+            "tense": {
+                "smile": -0.2,
+                "eyebrow_raise": -0.2,
+                "eye_open": 0.1,
+                "mouth_open": 0.0,
+            },
+            "neutral": {
+                "smile": 0.0,
+                "eyebrow_raise": 0.0,
+                "eye_open": 0.0,
+                "mouth_open": 0.0,
+            },
+        }
+
+        base_params = EMOTION_LIVEPORTRAIT_PARAMS.get(
+            emotion,
+            EMOTION_LIVEPORTRAIT_PARAMS["neutral"]
+        )
+
+        # 根据强度缩放参数
+        scaled_params = {
+            key: value * intensity
+            for key, value in base_params.items()
+        }
+
+        return {
+            "expression_params": scaled_params,
+            "emotion": emotion,
+            "intensity": intensity,
+            "lip_sync_scale": 1.0 + (intensity * 0.3),  # 口型幅度
+            "head_motion_scale": 0.5 + (intensity * 0.5),  # 头部运动幅度
+        }
+
 
 # 全局实例
 emotion_analyzer = DialogueEmotionAnalyzer(use_llm=True)

@@ -20,8 +20,11 @@ logger = logging.getLogger(__name__)
 
 class AlignmentStrategy(str, Enum):
     """时长对齐策略。"""
-    SLOW_MOTION = "slow_motion"
-    LOOP = "loop"
+    SLOW_MOTION = "slow_motion"  # 简单慢放（可能导致帧率不足）
+    LOOP = "loop"  # 循环播放（可能产生跳跃感）
+    SMOOTH_SLOW_MOTION = "smooth_slow_motion"  # 帧插值慢放（推荐）
+    FREEZE_FRAME = "freeze_frame"  # 定格最后一帧
+    EXTEND = "extend"  # 调用 I2V 扩展视频（最佳但最慢）
 
 
 @dataclass
@@ -81,18 +84,83 @@ def _align_video_to_audio(
     audio_duration: float,
     strategy: AlignmentStrategy
 ) -> VideoFileClip:
-    """对齐视频时长到音频时长。"""
+    """
+    对齐视频时长到音频时长。
+
+    改进的对齐策略：
+    - SMOOTH_SLOW_MOTION: 使用帧插值后再慢放，避免帧率不足
+    - FREEZE_FRAME: 定格最后一帧，适合静态场景
+    - EXTEND: 调用视频扩展（需要外部处理）
+    - LOOP: 循环播放（可能产生跳跃感）
+    - SLOW_MOTION: 简单慢放（可能导致帧率不足）
+    """
     video_duration = video_clip.duration
 
     if abs(video_duration - audio_duration) < 0.1:
         return video_clip
 
     if video_duration < audio_duration:
-        if strategy == AlignmentStrategy.SLOW_MOTION:
-            speed_factor = video_duration / audio_duration
+        gap = audio_duration - video_duration
+        speed_factor = video_duration / audio_duration
+
+        if strategy == AlignmentStrategy.SMOOTH_SLOW_MOTION:
+            # 使用帧插值实现平滑慢放
+            logger.debug(f"Applying smooth slow-motion with frame interpolation: speed={speed_factor:.2f}x")
+            try:
+                # 如果差距不大（<30%），直接慢放
+                if speed_factor > 0.7:
+                    return video_clip.with_speed_scaled(speed_factor)
+
+                # 差距较大时，使用帧插值
+                from integrations.frame_interpolation import smooth_slow_motion
+                import tempfile
+
+                # 先保存当前 clip 到临时文件
+                temp_input = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                temp_input.close()
+                video_clip.write_videofile(temp_input.name, fps=24, codec="libx264", logger=None)
+
+                # 进行平滑慢放
+                output_path = smooth_slow_motion(temp_input.name, speed_factor)
+
+                # 加载处理后的视频
+                new_clip = VideoFileClip(output_path)
+
+                # 清理临时文件
+                import os
+                try:
+                    os.unlink(temp_input.name)
+                except Exception:
+                    pass
+
+                return new_clip
+            except Exception as e:
+                logger.warning(f"Smooth slow-motion failed: {e}, falling back to simple slow-motion")
+                return video_clip.with_speed_scaled(speed_factor)
+
+        elif strategy == AlignmentStrategy.FREEZE_FRAME:
+            # 定格最后一帧
+            logger.debug(f"Applying freeze-frame to extend from {video_duration:.2f}s to {audio_duration:.2f}s")
+            from moviepy import ImageClip, concatenate_videoclips
+
+            # 获取最后一帧
+            last_frame = video_clip.get_frame(video_duration - 0.01)
+            freeze_clip = ImageClip(last_frame).with_duration(gap)
+
+            # 拼接原视频和定格帧
+            return concatenate_videoclips([video_clip, freeze_clip])
+
+        elif strategy == AlignmentStrategy.EXTEND:
+            # 视频扩展策略 - 这里只是标记，实际扩展需要在 pipeline 层处理
+            logger.debug(f"EXTEND strategy requested, falling back to smooth slow-motion")
+            # 回退到平滑慢放
+            return video_clip.with_speed_scaled(speed_factor)
+
+        elif strategy == AlignmentStrategy.SLOW_MOTION:
             logger.debug(f"Applying slow-motion: speed={speed_factor:.2f}x")
             return video_clip.with_speed_scaled(speed_factor)
-        else:
+
+        else:  # LOOP
             logger.debug(f"Applying loop to extend from {video_duration:.2f}s to {audio_duration:.2f}s")
             return video_clip.with_effects([Loop(duration=audio_duration)])
     else:
