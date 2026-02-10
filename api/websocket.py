@@ -35,7 +35,7 @@ class ConnectionManager:
                         encoding="utf-8",
                         decode_responses=True,
                         socket_connect_timeout=5,
-                        socket_timeout=5
+                        socket_timeout=None  # No timeout for pub/sub listening
                     ),
                     timeout=5.0
                 )
@@ -114,6 +114,13 @@ class ConnectionManager:
             logger.info("Redis listener cancelled")
         except Exception as e:
             logger.error(f"Redis listener error: {e}")
+            # Try to reconnect after error
+            self._listener_task = None
+            await asyncio.sleep(5)
+            try:
+                await self.start_listener()
+            except Exception:
+                logger.warning("Failed to restart Redis listener")
 
     async def connect_project(self, websocket: WebSocket, project_id: str):
         """Connect a WebSocket to receive project updates."""
