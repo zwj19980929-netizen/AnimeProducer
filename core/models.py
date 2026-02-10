@@ -61,6 +61,22 @@ class ChapterStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class BookUploadStatus(str, Enum):
+    """书籍上传状态。"""
+    EMPTY = "EMPTY"          # 未上传
+    PARTIAL = "PARTIAL"      # 部分上传
+    COMPLETE = "COMPLETE"    # 全部上传
+
+
+class EpisodeStatus(str, Enum):
+    """集状态。"""
+    PLANNED = "PLANNED"                    # 已规划
+    STORYBOARD_READY = "STORYBOARD_READY"  # 分镜就绪
+    RENDERING = "RENDERING"                # 渲染中
+    DONE = "DONE"                          # 完成
+    FAILED = "FAILED"                      # 失败
+
+
 # ============================================================================
 # Project and Job Tables
 # ============================================================================
@@ -152,6 +168,7 @@ class Character(SQLModel, table=True):
     name: str
     prompt_base: str
     reference_image_path: str
+    reference_image_url: str | None = None  # OSS URL
     voice_id: str | None = None
 
     character_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
@@ -185,6 +202,7 @@ class Shot(SQLModel, table=True):
     shot_id: Optional[int] = Field(default=None, primary_key=True)
 
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
+    episode_id: str | None = Field(default=None, foreign_key="episodes.id", index=True)
     chapter_id: str | None = Field(default=None, foreign_key="chapters.chapter_id", index=True)
 
     duration: float
@@ -196,6 +214,20 @@ class Shot(SQLModel, table=True):
     character_states: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
     dialogue: str | None = None
     action_type: str | None = None
+
+    # 情感相关字段
+    emotion: str | None = Field(
+        default=None,
+        description="镜头情感: happy, sad, angry, fearful, surprised, excited, tense, neutral"
+    )
+    emotion_intensity: float = Field(
+        default=0.5,
+        description="情感强度 0-1，0为最弱，1为最强"
+    )
+    emotion_context: str | None = Field(
+        default=None,
+        description="情感上下文描述，用于更精确的情感表达"
+    )
 
     sequence_order: int = Field(default=0)
 
@@ -218,7 +250,82 @@ class Chapter(SQLModel, table=True):
     title: str | None = None
     content: str
 
+    # 统计信息
+    word_count: int = Field(default=0)
+
+    # AI 分析结果
+    key_events: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    emotional_arc: str | None = None  # rising/falling/climax/resolution
+    importance_score: float = Field(default=0.5)  # 0-1, 章节重要性
+    suggested_episode: int | None = None  # AI 建议归属哪一集
+
+    # 角色出场
+    characters_appeared: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+
     status: ChapterStatus = Field(default=ChapterStatus.PENDING)
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Book(SQLModel, table=True):
+    """书籍元数据，一个项目对应一本书。"""
+    __tablename__ = "books"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    project_id: str = Field(foreign_key="projects.id", unique=True, index=True)
+
+    # 书籍信息
+    original_title: str | None = None
+    author: str | None = None
+    genre: str | None = None
+
+    # 统计信息
+    total_chapters: int = Field(default=0)
+    uploaded_chapters: int = Field(default=0)
+    total_words: int = Field(default=0)
+
+    # 上传状态
+    upload_status: BookUploadStatus = Field(default=BookUploadStatus.EMPTY)
+
+    # AI 分析结果
+    ai_summary: str | None = None
+    main_plot_points: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    suggested_episodes: int | None = None
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class Episode(SQLModel, table=True):
+    """集，一个项目可以有多集动漫。"""
+    __tablename__ = "episodes"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    project_id: str = Field(foreign_key="projects.id", index=True)
+
+    # 集信息
+    episode_number: int = Field(index=True)
+    title: str | None = None
+    synopsis: str | None = None
+
+    # 章节范围
+    start_chapter: int
+    end_chapter: int
+
+    # 时长规划
+    target_duration_minutes: float = Field(default=24.0)
+    actual_duration_minutes: float | None = None
+
+    # 状态
+    status: EpisodeStatus = Field(default=EpisodeStatus.PLANNED)
+
+    # 产出物
+    output_video_path: str | None = None
+    output_video_url: str | None = None
+
+    # 元数据
+    episode_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

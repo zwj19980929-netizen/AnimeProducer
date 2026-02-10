@@ -39,11 +39,21 @@ class CharacterDraft:
 
     def to_prompt_base(self) -> str:
         parts = []
-        if self.hair_color: parts.append(f"{self.hair_color} hair")
-        if self.eye_color: parts.append(f"{self.eye_color} eyes")
-        if self.physical_features: parts.append(self.physical_features)
-        if self.clothing: parts.append(self.clothing)
-        if self.age_range: parts.append(f"{self.age_range} age")
+        if self.hair_color:
+            hair = self.hair_color if isinstance(self.hair_color, str) else ", ".join(self.hair_color)
+            parts.append(f"{hair} hair")
+        if self.eye_color:
+            eyes = self.eye_color if isinstance(self.eye_color, str) else ", ".join(self.eye_color)
+            parts.append(f"{eyes} eyes")
+        if self.physical_features:
+            features = self.physical_features if isinstance(self.physical_features, str) else ", ".join(self.physical_features)
+            parts.append(features)
+        if self.clothing:
+            clothes = self.clothing if isinstance(self.clothing, str) else ", ".join(self.clothing)
+            parts.append(clothes)
+        if self.age_range:
+            age = self.age_range if isinstance(self.age_range, str) else ", ".join(self.age_range)
+            parts.append(f"{age} age")
         return ", ".join(parts) if parts else "detailed character portrait"
 
 
@@ -127,16 +137,32 @@ Return ONLY the valid JSON object matching the requested schema."""
             result = llm_client.generate_structured_output(prompt, CharacterListResponse, temperature=0.1)
             if result is None: return []
 
+            def ensure_str(val) -> str:
+                """确保值是字符串，如果是列表则拼接。"""
+                if val is None:
+                    return ""
+                if isinstance(val, list):
+                    return ", ".join(str(v) for v in val)
+                return str(val)
+
+            def ensure_list(val) -> list:
+                """确保值是列表。"""
+                if val is None:
+                    return []
+                if isinstance(val, list):
+                    return val
+                return [val]
+
             characters = []
             for char_data in result.characters:
                 draft = CharacterDraft(
-                    name=char_data.get("name", "Unknown"),
-                    hair_color=char_data.get("hair_color", ""),
-                    eye_color=char_data.get("eye_color", ""),
-                    clothing=char_data.get("clothing", ""),
-                    personality_keywords=char_data.get("personality_keywords", []),
-                    physical_features=char_data.get("physical_features", ""),
-                    age_range=char_data.get("age_range", ""),
+                    name=ensure_str(char_data.get("name")) or "Unknown",
+                    hair_color=ensure_str(char_data.get("hair_color")),
+                    eye_color=ensure_str(char_data.get("eye_color")),
+                    clothing=ensure_str(char_data.get("clothing")),
+                    personality_keywords=ensure_list(char_data.get("personality_keywords")),
+                    physical_features=ensure_str(char_data.get("physical_features")),
+                    age_range=ensure_str(char_data.get("age_range")),
                     first_appearance_chapter=chapter_number,
                     evolution_type="new"
                 )
@@ -207,18 +233,34 @@ Return ONLY the valid JSON object."""
             if result is None:
                 return []
 
+            def ensure_str(val) -> str:
+                """确保值是字符串，如果是列表则拼接。"""
+                if val is None:
+                    return ""
+                if isinstance(val, list):
+                    return ", ".join(str(v) for v in val)
+                return str(val)
+
+            def ensure_list(val) -> list:
+                """确保值是列表。"""
+                if val is None:
+                    return []
+                if isinstance(val, list):
+                    return val
+                return [val]
+
             characters = []
 
             # Process new characters
             for char_data in result.new_characters:
                 draft = CharacterDraft(
-                    name=char_data.get("name", "Unknown"),
-                    hair_color=char_data.get("hair_color", ""),
-                    eye_color=char_data.get("eye_color", ""),
-                    clothing=char_data.get("clothing", ""),
-                    personality_keywords=char_data.get("personality_keywords", []),
-                    physical_features=char_data.get("physical_features", ""),
-                    age_range=char_data.get("age_range", ""),
+                    name=ensure_str(char_data.get("name")) or "Unknown",
+                    hair_color=ensure_str(char_data.get("hair_color")),
+                    eye_color=ensure_str(char_data.get("eye_color")),
+                    clothing=ensure_str(char_data.get("clothing")),
+                    personality_keywords=ensure_list(char_data.get("personality_keywords")),
+                    physical_features=ensure_str(char_data.get("physical_features")),
+                    age_range=ensure_str(char_data.get("age_range")),
                     first_appearance_chapter=chapter_number,
                     evolution_type="new"
                 )
@@ -228,15 +270,15 @@ Return ONLY the valid JSON object."""
             for evo_data in result.character_evolutions:
                 new_traits = evo_data.get("new_traits", {})
                 draft = CharacterDraft(
-                    name=evo_data.get("character_name", "Unknown"),
-                    hair_color=new_traits.get("hair_color", ""),
-                    eye_color=new_traits.get("eye_color", ""),
-                    clothing=new_traits.get("clothing", ""),
+                    name=ensure_str(evo_data.get("character_name")) or "Unknown",
+                    hair_color=ensure_str(new_traits.get("hair_color")),
+                    eye_color=ensure_str(new_traits.get("eye_color")),
+                    clothing=ensure_str(new_traits.get("clothing")),
                     personality_keywords=[],
-                    physical_features=new_traits.get("physical_features", ""),
+                    physical_features=ensure_str(new_traits.get("physical_features")),
                     age_range="",
                     first_appearance_chapter=chapter_number,
-                    evolution_type=evo_data.get("evolution_type", "evolution")
+                    evolution_type=ensure_str(evo_data.get("evolution_type")) or "evolution"
                 )
                 characters.append(draft)
 
@@ -412,7 +454,7 @@ Return ONLY the valid JSON object."""
     ) -> List[Candidate]:
         """
         Generate reference images for a character.
-        
+
         :param character: Character object to generate images for
         :param style_spec: Style specification string
         :param n: Number of candidate images to generate
@@ -424,6 +466,12 @@ Return ONLY the valid JSON object."""
             project_id = character.project_id or character.character_id.split("_")[0]
 
         logger.info(f"Generating {n} reference images for character '{character.name}'")
+
+        # 检查是否配置了 OSS
+        from integrations.oss_service import is_oss_configured, OSSService
+        use_oss = is_oss_configured()
+
+        # 本地目录仍然需要用于临时存储或作为备份
         character_dir = self._get_character_dir(project_id, character.character_id)
         self._ensure_dir(character_dir)
         version = self._get_next_version(character_dir)
@@ -441,16 +489,28 @@ Return ONLY the valid JSON object."""
                 # 调用绘图接口，传入 style_preset 以确保画风一致性
                 image_bytes = gen_client.generate_image(full_prompt, style_preset=style_preset)
                 if image_bytes:
-                    image_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.png"
-                    with open(image_path, "wb") as f: f.write(image_bytes)
+                    if use_oss:
+                        # 直接上传到 OSS
+                        oss = OSSService.get_instance()
+                        filename = f"char_{character.character_id}_v{version}_ref_{i+1}_seed{seed}"
+                        image_url = oss.upload_image_bytes(image_bytes, filename=filename)
+                        candidates.append(Candidate(
+                            path=image_url, seed=seed, prompt=full_prompt,
+                            generation_params=generation_params, version=version
+                        ))
+                        logger.info(f"角色参考图已上传到 OSS: {image_url}")
+                    else:
+                        # 保存到本地
+                        image_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.png"
+                        with open(image_path, "wb") as f: f.write(image_bytes)
 
-                    params_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.json"
-                    with open(params_path, "w") as f: json.dump(generation_params, f, indent=2)
+                        params_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.json"
+                        with open(params_path, "w") as f: json.dump(generation_params, f, indent=2)
 
-                    candidates.append(Candidate(
-                        path=str(image_path), seed=seed, prompt=full_prompt,
-                        generation_params=generation_params, version=version
-                    ))
+                        candidates.append(Candidate(
+                            path=str(image_path), seed=seed, prompt=full_prompt,
+                            generation_params=generation_params, version=version
+                        ))
             except Exception as e:
                 logger.error(f"Error generating candidate {i+1}: {e}")
         return candidates
@@ -464,10 +524,32 @@ Return ONLY the valid JSON object."""
         if not candidates: return None
         best = max(candidates, key=lambda c: (c.score, -c.seed))
 
-        if character and Path(best.path).exists():
-            character_dir = Path(best.path).parent
-            current_ref_path = character_dir / "current_ref.png"
-            shutil.copy2(best.path, current_ref_path)
+        # 检查 best.path 是否是 OSS URL
+        is_oss_url = best.path.startswith("http://") or best.path.startswith("https://")
+
+        if character:
+            oss_url = None
+            local_path = None
+
+            if is_oss_url:
+                # 已经是 OSS URL，直接使用
+                oss_url = best.path
+                logger.info(f"使用 OSS URL 作为角色参考图: {oss_url}")
+            elif Path(best.path).exists():
+                # 本地文件，复制并上传到 OSS
+                character_dir = Path(best.path).parent
+                current_ref_path = character_dir / "current_ref.png"
+                shutil.copy2(best.path, current_ref_path)
+                local_path = str(current_ref_path)
+
+                # 上传到 OSS
+                try:
+                    from integrations.oss_service import is_oss_configured, upload_file_to_oss
+                    if is_oss_configured():
+                        oss_url = upload_file_to_oss(local_path, cleanup=False)
+                        logger.info(f"角色参考图已上传到 OSS: {oss_url}")
+                except Exception as e:
+                    logger.warning(f"上传角色参考图到 OSS 失败: {e}")
 
             db = session or self.session
             should_close = False
@@ -478,7 +560,13 @@ Return ONLY the valid JSON object."""
             try:
                 db_character = db.get(Character, character.character_id)
                 if db_character:
-                    db_character.reference_image_path = str(current_ref_path)
+                    if local_path:
+                        db_character.reference_image_path = local_path
+                    if oss_url:
+                        db_character.reference_image_url = oss_url
+                        # 如果有 OSS URL，也可以用它作为 path（前端优先使用 URL）
+                        if not local_path:
+                            db_character.reference_image_path = oss_url
                     db.add(db_character)
                     db.commit()
             except Exception:
@@ -488,7 +576,7 @@ Return ONLY the valid JSON object."""
             finally:
                 if should_close: db.close()
 
-            return str(current_ref_path)
+            return oss_url or local_path or best.path
         return best.path
 
     def get_reference_images(self, character_ids: List[str]) -> Dict[str, Optional[str]]:

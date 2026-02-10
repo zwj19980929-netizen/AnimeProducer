@@ -3,9 +3,11 @@
     <!-- Header with Add Button -->
     <div class="flex justify-between items-center">
       <h3 class="text-lg font-semibold text-white">章节列表</h3>
-      <n-button type="primary" @click="showAddModal = true">
-        添加章节
-      </n-button>
+      <div class="flex gap-2">
+        <n-button @click="showAddModal = true">
+          添加章节
+        </n-button>
+      </div>
     </div>
 
     <!-- Loading State -->
@@ -16,7 +18,7 @@
     <!-- Empty State -->
     <n-empty
       v-else-if="chapters.length === 0"
-      description="暂无章节，点击上方按钮添加"
+      description="暂无章节，点击上方按钮添加或在「书籍」标签页上传整本书"
       class="py-8"
     />
 
@@ -32,9 +34,30 @@
             <div class="flex items-center gap-3 mb-2">
               <span class="text-purple-400 font-mono">第 {{ chapter.chapter_number }} 章</span>
               <ChapterStatusBadge :status="chapter.status" />
+              <span v-if="chapter.word_count" class="text-gray-500 text-xs">
+                {{ formatWordCount(chapter.word_count) }}
+              </span>
+              <span v-if="chapter.suggested_episode" class="text-blue-400 text-xs">
+                → 第 {{ chapter.suggested_episode }} 集
+              </span>
             </div>
-            <h4 class="text-white font-medium mb-1">{{ chapter.title }}</h4>
+            <h4 class="text-white font-medium mb-1">{{ chapter.title || '无标题' }}</h4>
             <p class="text-gray-400 text-sm line-clamp-2">{{ chapter.content }}</p>
+
+            <!-- 分析结果 -->
+            <div v-if="chapter.key_events?.length" class="mt-2">
+              <div class="flex flex-wrap gap-1">
+                <n-tag v-if="chapter.emotional_arc" size="tiny" :type="getArcType(chapter.emotional_arc)">
+                  {{ getArcLabel(chapter.emotional_arc) }}
+                </n-tag>
+                <n-tag size="tiny" :type="getImportanceType(chapter.importance_score)">
+                  重要性 {{ (chapter.importance_score * 100).toFixed(0) }}%
+                </n-tag>
+              </div>
+              <p class="text-gray-500 text-xs mt-1 line-clamp-1">
+                {{ chapter.key_events.slice(0, 2).join('; ') }}
+              </p>
+            </div>
           </div>
           <n-button
             quaternary
@@ -73,7 +96,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { NButton, NIcon, NSpin, NEmpty, useDialog, useMessage } from 'naive-ui'
+import { NButton, NIcon, NSpin, NEmpty, NTag, useDialog, useMessage } from 'naive-ui'
 import { apiClient } from '@/api/client'
 import type { Chapter } from '@/types/api'
 import ChapterStatusBadge from './ChapterStatusBadge.vue'
@@ -99,6 +122,41 @@ const nextChapterNumber = computed(() => {
   return maxNumber + 1
 })
 
+function formatWordCount(count: number): string {
+  if (count >= 10000) {
+    return (count / 10000).toFixed(1) + '万字'
+  }
+  return count + '字'
+}
+
+function getArcType(arc: string): 'default' | 'info' | 'success' | 'warning' | 'error' {
+  const types: Record<string, 'default' | 'info' | 'success' | 'warning' | 'error'> = {
+    rising: 'warning',
+    falling: 'info',
+    climax: 'error',
+    resolution: 'success',
+    neutral: 'default'
+  }
+  return types[arc] || 'default'
+}
+
+function getArcLabel(arc: string): string {
+  const labels: Record<string, string> = {
+    rising: '上升',
+    falling: '下降',
+    climax: '高潮',
+    resolution: '解决',
+    neutral: '平稳'
+  }
+  return labels[arc] || arc
+}
+
+function getImportanceType(score: number): 'default' | 'info' | 'success' | 'warning' | 'error' {
+  if (score >= 0.8) return 'error'
+  if (score >= 0.5) return 'warning'
+  return 'default'
+}
+
 onMounted(() => {
   loadChapters()
 })
@@ -123,7 +181,7 @@ function handleViewChapter(chapter: Chapter) {
 function handleDeleteChapter(chapter: Chapter) {
   dialog.warning({
     title: '删除章节',
-    content: `确定要删除第 ${chapter.chapter_number} 章「${chapter.title}」吗？此操作无法撤销。`,
+    content: `确定要删除第 ${chapter.chapter_number} 章「${chapter.title || '无标题'}」吗？此操作无法撤销。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -138,4 +196,9 @@ function handleDeleteChapter(chapter: Chapter) {
     }
   })
 }
+
+// 暴露方法供父组件调用
+defineExpose({
+  loadChapters
+})
 </script>

@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -105,6 +106,9 @@ class AudioGenRequest:
     voice_id: Optional[str] = None
     language: str = "zh-CN"
     speed: float = 1.0
+    # 情感参数
+    emotion: Optional[str] = None  # happy, sad, angry, fearful, surprised, excited, tense, neutral
+    emotion_intensity: float = 0.5  # 0-1
 
 
 @dataclass
@@ -587,10 +591,42 @@ class AudioGenerator(PipelineComponent):
         self.logger.info(f"Generating audio for shot {request.shot_id}")
         self.logger.debug(f"Text: {request.text[:100]}...")
 
-        audio_data = self._tts_client.synthesize(
-            text=request.text,
-            voice_id=request.voice_id
-        )
+        # 根据情感计算 TTS 参数
+        tts_speed = request.speed
+        tts_emotion = None
+        tts_pitch = 0
+
+        if request.emotion:
+            from core.emotion_analyzer import emotion_analyzer
+            tts_params = emotion_analyzer.get_tts_params(
+                emotion=request.emotion,
+                intensity=request.emotion_intensity,
+                base_speed=request.speed,
+            )
+            tts_speed = tts_params["speed"]
+            tts_emotion = tts_params["emotion"]
+            tts_pitch = tts_params["pitch"]
+            self.logger.info(
+                f"Emotion-aware TTS: emotion={request.emotion}, "
+                f"intensity={request.emotion_intensity:.2f}, "
+                f"speed={tts_speed:.2f}, pitch={tts_pitch}, tts_emotion={tts_emotion}"
+            )
+
+        # 调用 TTS 客户端，传递情感参数
+        try:
+            audio_data = self._tts_client.synthesize(
+                text=request.text,
+                voice_id=request.voice_id,
+                speed=tts_speed,
+                emotion=tts_emotion,
+            )
+        except TypeError:
+            # 某些 TTS 客户端可能不支持 emotion 参数
+            self.logger.warning("TTS client does not support emotion parameter, falling back")
+            audio_data = self._tts_client.synthesize(
+                text=request.text,
+                voice_id=request.voice_id,
+            )
 
         if not audio_data:
             raise RuntimeError(f"Failed to generate audio for shot {request.shot_id}")
@@ -626,7 +662,9 @@ class AudioGenerator(PipelineComponent):
                 "text": request.text,
                 "voice_id": request.voice_id,
                 "language": request.language,
-                "speed": request.speed,
+                "speed": tts_speed,
+                "emotion": request.emotion,
+                "emotion_intensity": request.emotion_intensity,
                 "oss_url": audio_url
             }
         )
@@ -865,7 +903,10 @@ class ShotPipeline:
         voice_id: Optional[str] = None,
         target_duration: float = 4.0,
         alignment_strategy: AlignmentStrategy = AlignmentStrategy.LOOP,
-        character_ids: Optional[List[str]] = None
+        character_ids: Optional[List[str]] = None,
+        # 情感参数
+        emotion: Optional[str] = None,
+        emotion_intensity: float = 0.5,
     ) -> ShotArtifact:
         """
         处理单个镜头的完整流水线 (Audio-First)
@@ -887,11 +928,33 @@ class ShotPipeline:
             target_duration: 目标时长（无对白时使用）
             alignment_strategy: 对齐策略
             character_ids: 出场角色 ID 列表（可选）
+            emotion: 镜头情感（可选，如未提供则从对白分析）
+            emotion_intensity: 情感强度 0-1
 
         Returns:
             镜头产出物
         """
         self.logger.info(f"Processing shot {shot_id} (Audio-First Pipeline)")
+
+        # ========== 情感分析 ==========
+        effective_emotion = emotion
+        effective_emotion_intensity = emotion_intensity
+
+        # 如果没有提供情感，从对白分析
+        if not effective_emotion and dialogue:
+            from core.emotion_analyzer import emotion_analyzer
+            self.logger.info("Analyzing dialogue emotion...")
+            emotion_result = emotion_analyzer.analyze(
+                dialogue=dialogue,
+                context=visual_prompt,
+            )
+            effective_emotion = emotion_result.emotion
+            effective_emotion_intensity = emotion_result.intensity
+            self.logger.info(
+                f"Detected emotion: {effective_emotion} "
+                f"(intensity={effective_emotion_intensity:.2f}, "
+                f"confidence={emotion_result.confidence:.2f})"
+            )
 
         # ========== 角色一致性处理 ==========
         effective_reference_image = reference_image_path
@@ -928,11 +991,13 @@ class ShotPipeline:
         duration_plan: Optional[DurationPlan] = None
 
         if dialogue:
-            self.logger.info(f"[Step 1/4] Generating audio for dialogue...")
+            self.logger.info(f"[Step 1/4] Generating audio for dialogue (emotion={effective_emotion})...")
             audio_result = self.audio_generator.process(AudioGenRequest(
                 shot_id=shot_id,
                 text=dialogue,
-                voice_id=effective_voice_id
+                voice_id=effective_voice_id,
+                emotion=effective_emotion,
+                emotion_intensity=effective_emotion_intensity,
             ))
             audio_path = audio_result.audio_path
             audio_duration = audio_result.duration
@@ -955,10 +1020,20 @@ class ShotPipeline:
         # ========== Step 3: 关键帧生成 ==========
         self.logger.info(f"[Step 3/4] Generating keyframe...")
 
-        # 构建增强的提示词（包含角色标签）
+        # 构建增强的提示词（包含角色标签和情感标签）
         enhanced_prompt = visual_prompt
         if character_tags:
             enhanced_prompt = f"{', '.join(character_tags)}, {visual_prompt}"
+
+        # 添加情感视觉标签
+        if effective_emotion and effective_emotion != "neutral":
+            from core.emotion_analyzer import emotion_analyzer
+            enhanced_prompt = emotion_analyzer.enhance_visual_prompt(
+                visual_prompt=enhanced_prompt,
+                emotion=effective_emotion,
+                intensity=effective_emotion_intensity,
+            )
+            self.logger.info(f"Enhanced prompt with emotion tags: {enhanced_prompt[:100]}...")
 
         keyframe_result = self._generate_keyframe_with_retry(
             shot_id=shot_id,
@@ -1038,9 +1113,10 @@ class ShotPipeline:
             duration_plan: 时长规划
 
         Returns:
-            拼接后的视频路径
+            拼接后的视频 URL（OSS）或本地路径
         """
         from moviepy import VideoFileClip, concatenate_videoclips
+        import tempfile
 
         self.logger.info(
             f"Generating {duration_plan.video_segments} video segments "
@@ -1063,28 +1139,66 @@ class ShotPipeline:
             ))
             segment_paths.append(video_result.video_path)
 
+        # 下载 OSS 视频到临时文件（如果是 URL）
+        from integrations.oss_service import is_oss_configured, OSSService
+        temp_files = []
+        local_segment_paths = []
+
+        for path in segment_paths:
+            if path.startswith("http://") or path.startswith("https://"):
+                # 从 OSS 下载到临时文件
+                oss = OSSService.get_instance()
+                temp_path = oss.download_to_temp(path)
+                temp_files.append(temp_path)
+                local_segment_paths.append(temp_path)
+            else:
+                local_segment_paths.append(path)
+
         # 拼接视频
-        self.logger.info(f"Concatenating {len(segment_paths)} video segments...")
-        clips = [VideoFileClip(path) for path in segment_paths]
+        self.logger.info(f"Concatenating {len(local_segment_paths)} video segments...")
+        clips = [VideoFileClip(path) for path in local_segment_paths]
 
         try:
             final_clip = concatenate_videoclips(clips, method="compose")
-            output_path = os.path.join(
-                settings.OUTPUT_DIR,
-                f"video_shot_{sanitize_filename(shot_id)}_combined.mp4"
-            )
+
+            # 使用临时文件保存拼接后的视频
+            temp_output = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            temp_output.close()
+
             final_clip.write_videofile(
-                output_path,
+                temp_output.name,
                 fps=24,
                 codec="libx264",
                 logger=None
             )
-            self.logger.info(f"Combined video saved: {output_path}")
-            return output_path
+
+            # 上传到 OSS
+            if is_oss_configured():
+                oss = OSSService.get_instance()
+                filename = f"video_shot_{sanitize_filename(shot_id)}_combined"
+                video_url = oss.upload_file_and_cleanup(temp_output.name, folder="videos")
+                self.logger.info(f"Combined video uploaded to OSS: {video_url}")
+                return video_url
+            else:
+                # 移动到输出目录
+                output_path = os.path.join(
+                    settings.OUTPUT_DIR,
+                    f"video_shot_{sanitize_filename(shot_id)}_combined.mp4"
+                )
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                shutil.move(temp_output.name, output_path)
+                self.logger.info(f"Combined video saved: {output_path}")
+                return output_path
         finally:
             for clip in clips:
                 try:
                     clip.close()
+                except Exception:
+                    pass
+            # 清理临时文件
+            for temp_file in temp_files:
+                try:
+                    os.remove(temp_file)
                 except Exception:
                     pass
     

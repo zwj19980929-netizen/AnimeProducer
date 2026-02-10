@@ -49,33 +49,54 @@
           </div>
         </div>
       </div>
-      <n-empty v-else description="还没有故事板。从脚本生成故事板。" class="py-20" />
+      <n-empty v-else :description="emptyDescription" class="py-20" />
     </n-spin>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { NSpin, NEmpty, NTag } from 'naive-ui'
 import { apiClient } from '@/api/client'
 import type { Shot } from '@/types/api'
 
 const props = defineProps<{
   projectId: string
+  episodeNumber?: number
 }>()
 
 const shots = ref<Shot[]>([])
 const loading = ref(false)
 
-onMounted(async () => {
+const emptyDescription = computed(() => {
+  if (props.episodeNumber) {
+    return `第 ${props.episodeNumber} 集还没有分镜，请先生成分镜。`
+  }
+  return '还没有故事板。从脚本生成故事板。'
+})
+
+async function loadShots() {
   loading.value = true
   try {
-    const response = await apiClient.listShots(props.projectId)
+    let response
+    if (props.episodeNumber) {
+      response = await apiClient.listEpisodeShots(props.projectId, props.episodeNumber)
+    } else {
+      response = await apiClient.listShots(props.projectId)
+    }
     shots.value = response.items.sort((a, b) => a.sequence_order - b.sequence_order)
   } catch (error) {
     console.error('Failed to load shots:', error)
   } finally {
     loading.value = false
   }
+}
+
+watch(() => [props.projectId, props.episodeNumber], () => {
+  loadShots()
+})
+
+onMounted(() => {
+  loadShots()
 })
 </script>

@@ -20,13 +20,28 @@ import type {
   ShotRenderListResponse,
   Chapter,
   ChapterCreate,
+  ChapterUpdate,
   ChapterListResponse,
+  ChapterAnalysisResult,
+  ChapterBatchAnalysisResponse,
+  Book,
+  BookUpdate,
+  Episode,
+  EpisodeCreate,
+  EpisodeUpdate,
+  EpisodeListResponse,
+  EpisodePlanRequest,
+  EpisodePlanResponse,
   PipelineStartRequest,
   PipelineStartResponse,
   ErrorResponse,
   ConfigStatusResponse,
   ProviderTestResult,
-  AllTestsResponse
+  AllTestsResponse,
+  VoiceConfig,
+  VoicePreviewRequest,
+  VoicePreviewResponse,
+  AvailableVoicesResponse
 } from '@/types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -98,6 +113,15 @@ class ApiClient {
     return response.data
   }
 
+  async buildAssetsFromChapters(projectId: string): Promise<Project> {
+    const response = await this.client.post<Project>(
+      `/projects/${projectId}/assets/build-from-chapters`,
+      {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
   async generateStoryboard(projectId: string): Promise<ShotListResponse> {
     const response = await this.client.post<ShotListResponse>(
       `/projects/${projectId}/storyboard/generate`,
@@ -142,6 +166,144 @@ class ApiClient {
     await this.client.delete(`/projects/${projectId}/chapters/${chapterNumber}`)
   }
 
+  async updateChapter(projectId: string, chapterNumber: number, data: ChapterUpdate): Promise<Chapter> {
+    const response = await this.client.patch<Chapter>(
+      `/projects/${projectId}/chapters/${chapterNumber}`,
+      data
+    )
+    return response.data
+  }
+
+  async analyzeChapter(projectId: string, chapterNumber: number): Promise<ChapterAnalysisResult> {
+    const response = await this.client.post<ChapterAnalysisResult>(
+      `/projects/${projectId}/chapters/${chapterNumber}/analyze`,
+      {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async analyzeAllChapters(projectId: string, force: boolean = false): Promise<ChapterBatchAnalysisResponse> {
+    const response = await this.client.post<ChapterBatchAnalysisResponse>(
+      `/projects/${projectId}/chapters/analyze-all`,
+      {},
+      { params: { force }, timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  // Book
+  async getBook(projectId: string): Promise<Book> {
+    const response = await this.client.get<Book>(`/projects/${projectId}/book`)
+    return response.data
+  }
+
+  async updateBook(projectId: string, data: BookUpdate): Promise<Book> {
+    const response = await this.client.patch<Book>(`/projects/${projectId}/book`, data)
+    return response.data
+  }
+
+  async uploadBook(projectId: string, file: File, replaceExisting: boolean = false): Promise<ChapterListResponse> {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await this.client.post<ChapterListResponse>(
+      `/projects/${projectId}/book/upload`,
+      formData,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        params: { replace_existing: replaceExisting },
+        timeout: this.longTimeout
+      }
+    )
+    return response.data
+  }
+
+  async analyzeBook(projectId: string): Promise<Book> {
+    const response = await this.client.post<Book>(
+      `/projects/${projectId}/book/analyze`,
+      {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  // Episodes
+  async planEpisodes(projectId: string, data?: EpisodePlanRequest): Promise<EpisodePlanResponse> {
+    const response = await this.client.post<EpisodePlanResponse>(
+      `/projects/${projectId}/episodes/plan`,
+      data || {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async createEpisode(projectId: string, data: EpisodeCreate): Promise<Episode> {
+    const response = await this.client.post<Episode>(`/projects/${projectId}/episodes`, data)
+    return response.data
+  }
+
+  async createEpisodesBatch(projectId: string, episodes: EpisodeCreate[]): Promise<EpisodeListResponse> {
+    const response = await this.client.post<EpisodeListResponse>(
+      `/projects/${projectId}/episodes/batch`,
+      { episodes }
+    )
+    return response.data
+  }
+
+  async listEpisodes(projectId: string, status?: string): Promise<EpisodeListResponse> {
+    const response = await this.client.get<EpisodeListResponse>(
+      `/projects/${projectId}/episodes`,
+      { params: status ? { status } : undefined }
+    )
+    return response.data
+  }
+
+  async getEpisode(projectId: string, episodeNumber: number): Promise<Episode> {
+    const response = await this.client.get<Episode>(`/projects/${projectId}/episodes/${episodeNumber}`)
+    return response.data
+  }
+
+  async updateEpisode(projectId: string, episodeNumber: number, data: EpisodeUpdate): Promise<Episode> {
+    const response = await this.client.patch<Episode>(
+      `/projects/${projectId}/episodes/${episodeNumber}`,
+      data
+    )
+    return response.data
+  }
+
+  async deleteEpisode(projectId: string, episodeNumber: number): Promise<void> {
+    await this.client.delete(`/projects/${projectId}/episodes/${episodeNumber}`)
+  }
+
+  async deleteAllEpisodes(projectId: string): Promise<void> {
+    await this.client.delete(`/projects/${projectId}/episodes`)
+  }
+
+  async generateEpisodeStoryboard(projectId: string, episodeNumber: number): Promise<ShotListResponse> {
+    const response = await this.client.post<ShotListResponse>(
+      `/projects/${projectId}/episodes/${episodeNumber}/storyboard/generate`,
+      {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async startEpisodeRender(projectId: string, episodeNumber: number): Promise<PipelineStartResponse> {
+    const response = await this.client.post<PipelineStartResponse>(
+      `/projects/${projectId}/episodes/${episodeNumber}/render/start`,
+      {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async listEpisodeShots(projectId: string, episodeNumber: number): Promise<ShotListResponse> {
+    const response = await this.client.get<ShotListResponse>(
+      `/projects/${projectId}/episodes/${episodeNumber}/shots`
+    )
+    return response.data
+  }
+
   // Characters
   async createCharacter(data: CharacterCreate, projectId?: string): Promise<Character> {
     const response = await this.client.post<Character>('/assets/characters', data, {
@@ -171,9 +333,41 @@ class ApiClient {
     await this.client.delete(`/assets/characters/${characterId}`)
   }
 
-  async generateCharacterReference(characterId: string): Promise<{ message: string; image_path: string }> {
-    const response = await this.client.post<{ message: string; image_path: string }>(
-      `/assets/characters/${characterId}/generate-reference`
+  async generateCharacterReference(
+    characterId: string,
+    options?: {
+      custom_prompt?: string
+      style_preset?: string
+      num_candidates?: number
+    }
+  ): Promise<Character> {
+    const response = await this.client.post<Character>(
+      `/assets/characters/${characterId}/generate-reference`,
+      options || {},
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  // Voice APIs
+  async listAvailableVoices(): Promise<AvailableVoicesResponse> {
+    const response = await this.client.get<AvailableVoicesResponse>('/assets/voices')
+    return response.data
+  }
+
+  async previewVoice(request: VoicePreviewRequest): Promise<VoicePreviewResponse> {
+    const response = await this.client.post<VoicePreviewResponse>(
+      '/assets/voices/preview',
+      request,
+      { timeout: 60000 }
+    )
+    return response.data
+  }
+
+  async setCharacterVoice(characterId: string, voiceConfig: VoiceConfig): Promise<Character> {
+    const response = await this.client.post<Character>(
+      `/assets/characters/${characterId}/voice`,
+      voiceConfig
     )
     return response.data
   }

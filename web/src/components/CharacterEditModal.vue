@@ -42,11 +42,74 @@
         />
       </n-form-item>
 
-      <n-form-item label="语音ID" path="voice_id">
-        <n-input
-          v-model:value="formData.voice_id"
-          placeholder="输入语音合成的语音ID（可选）"
-        />
+      <!-- 语音配置 -->
+      <n-divider>语音配置</n-divider>
+
+      <n-form-item label="语音选择" path="voice_id">
+        <div class="w-full space-y-3">
+          <div class="flex gap-2">
+            <n-select
+              v-model:value="formData.voice_id"
+              :options="voiceOptions"
+              placeholder="选择语音"
+              clearable
+              filterable
+              class="flex-1"
+              :loading="loadingVoices"
+            />
+            <n-button
+              :disabled="!formData.voice_id"
+              :loading="previewing"
+              @click="handlePreviewVoice"
+            >
+              试听
+            </n-button>
+          </div>
+
+          <!-- 语音预览播放器 -->
+          <div v-if="previewAudioUrl" class="bg-gray-800 rounded-lg p-3">
+            <div class="flex items-center gap-3">
+              <audio
+                ref="audioRef"
+                :src="previewAudioUrl"
+                controls
+                class="flex-1 h-8"
+              />
+              <span class="text-gray-400 text-sm">{{ previewDuration.toFixed(1) }}s</span>
+            </div>
+          </div>
+
+          <!-- 语音参数 -->
+          <div class="grid grid-cols-2 gap-4">
+            <n-form-item label="语速" :show-feedback="false">
+              <n-slider
+                v-model:value="formData.voice_speed"
+                :min="0.5"
+                :max="2.0"
+                :step="0.1"
+                :format-tooltip="(v: number) => `${v}x`"
+              />
+            </n-form-item>
+            <n-form-item label="音调" :show-feedback="false">
+              <n-slider
+                v-model:value="formData.voice_pitch"
+                :min="-12"
+                :max="12"
+                :step="1"
+              />
+            </n-form-item>
+          </div>
+
+          <!-- 预览文本 -->
+          <n-form-item label="预览文本" :show-feedback="false">
+            <n-input
+              v-model:value="previewText"
+              type="textarea"
+              placeholder="输入要预览的文本..."
+              :rows="2"
+            />
+          </n-form-item>
+        </div>
       </n-form-item>
     </n-form>
 
@@ -62,11 +125,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { NModal, NForm, NFormItem, NInput, NButton, useMessage } from 'naive-ui'
-import type { FormInst, FormRules } from 'naive-ui'
+import { ref, computed, watch, onMounted } from 'vue'
+import { NModal, NForm, NFormItem, NInput, NButton, NSelect, NSlider, NDivider, useMessage } from 'naive-ui'
+import type { FormInst, FormRules, SelectOption } from 'naive-ui'
 import { apiClient } from '@/api/client'
-import type { Character } from '@/types/api'
+import type { Character, VoiceInfo } from '@/types/api'
 
 const props = defineProps<{
   show: boolean
@@ -81,6 +144,8 @@ const emit = defineEmits<{
 
 const message = useMessage()
 const loading = ref(false)
+const loadingVoices = ref(false)
+const previewing = ref(false)
 
 const visible = computed({
   get: () => props.show,
@@ -90,12 +155,29 @@ const visible = computed({
 const isEditing = computed(() => !!props.character)
 
 const formRef = ref<FormInst | null>(null)
+const audioRef = ref<HTMLAudioElement | null>(null)
+
 const formData = ref({
   character_id: '',
   name: '',
   prompt_base: '',
   reference_image_path: '',
-  voice_id: ''
+  voice_id: '',
+  voice_speed: 1.0,
+  voice_pitch: 0
+})
+
+// 语音相关
+const voices = ref<VoiceInfo[]>([])
+const previewText = ref('你好，我是这个角色的声音。')
+const previewAudioUrl = ref('')
+const previewDuration = ref(0)
+
+const voiceOptions = computed<SelectOption[]>(() => {
+  return voices.value.map(v => ({
+    label: `${v.name} (${v.gender}) - ${v.description}`,
+    value: v.id
+  }))
 })
 
 const rules: FormRules = {
@@ -115,15 +197,62 @@ const rules: FormRules = {
   ]
 }
 
+// 加载可用语音列表
+async function loadVoices() {
+  loadingVoices.value = true
+  try {
+    const response = await apiClient.listAvailableVoices()
+    voices.value = response.voices
+  } catch (error) {
+    console.error('Failed to load voices:', error)
+  } finally {
+    loadingVoices.value = false
+  }
+}
+
+// 预览语音
+async function handlePreviewVoice() {
+  if (!formData.value.voice_id) return
+
+  previewing.value = true
+  try {
+    const response = await apiClient.previewVoice({
+      text: previewText.value || '你好，我是这个角色的声音。',
+      voice_id: formData.value.voice_id,
+      speed: formData.value.voice_speed
+    })
+    previewAudioUrl.value = response.audio_url
+    previewDuration.value = response.duration
+
+    // 自动播放
+    setTimeout(() => {
+      audioRef.value?.play()
+    }, 100)
+  } catch (error) {
+    console.error('Failed to preview voice:', error)
+    message.error(`语音预览失败: ${error instanceof Error ? error.message : '未知错误'}`)
+  } finally {
+    previewing.value = false
+  }
+}
+
 watch(() => [props.show, props.character], ([show, character]) => {
   if (show) {
+    // 加载语音列表
+    if (voices.value.length === 0) {
+      loadVoices()
+    }
+
     if (character) {
+      const voiceConfig = character.character_metadata?.voice_config as any
       formData.value = {
         character_id: character.character_id,
         name: character.name,
         prompt_base: character.prompt_base || '',
         reference_image_path: character.reference_image_path || '',
-        voice_id: character.voice_id || ''
+        voice_id: character.voice_id || '',
+        voice_speed: voiceConfig?.speed || 1.0,
+        voice_pitch: voiceConfig?.pitch || 0
       }
     } else {
       formData.value = {
@@ -131,9 +260,14 @@ watch(() => [props.show, props.character], ([show, character]) => {
         name: '',
         prompt_base: '',
         reference_image_path: '',
-        voice_id: ''
+        voice_id: '',
+        voice_speed: 1.0,
+        voice_pitch: 0
       }
     }
+    // 清除预览
+    previewAudioUrl.value = ''
+    previewDuration.value = 0
   }
 }, { immediate: true })
 
@@ -143,12 +277,23 @@ async function handleSubmit() {
     loading.value = true
 
     if (isEditing.value && props.character) {
+      // 更新角色基本信息
       await apiClient.updateCharacter(props.character.character_id, {
         name: formData.value.name,
         prompt_base: formData.value.prompt_base || undefined,
         reference_image_path: formData.value.reference_image_path || undefined,
         voice_id: formData.value.voice_id || undefined
       })
+
+      // 如果设置了语音，更新语音配置
+      if (formData.value.voice_id) {
+        await apiClient.setCharacterVoice(props.character.character_id, {
+          voice_id: formData.value.voice_id,
+          speed: formData.value.voice_speed,
+          pitch: formData.value.voice_pitch
+        })
+      }
+
       message.success('角色更新成功')
     } else {
       await apiClient.createCharacter({

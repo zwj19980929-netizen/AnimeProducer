@@ -42,6 +42,20 @@ export enum ChapterStatus {
   FAILED = 'FAILED'
 }
 
+export enum BookUploadStatus {
+  EMPTY = 'EMPTY',
+  PARTIAL = 'PARTIAL',
+  COMPLETE = 'COMPLETE'
+}
+
+export enum EpisodeStatus {
+  PLANNED = 'PLANNED',
+  STORYBOARD_READY = 'STORYBOARD_READY',
+  RENDERING = 'RENDERING',
+  DONE = 'DONE',
+  FAILED = 'FAILED'
+}
+
 // Metadata types - use specific interfaces instead of Record<string, any>
 export interface ProjectMetadata {
   genre?: string
@@ -142,9 +156,48 @@ export interface Character {
   name: string
   prompt_base?: string
   reference_image_path?: string
+  reference_image_url?: string
   voice_id?: string
   character_metadata?: CharacterMetadata
   created_at: string
+}
+
+export interface GenerateReferenceRequest {
+  custom_prompt?: string
+  style_preset?: string
+  num_candidates?: number
+}
+
+export interface VoiceConfig {
+  voice_id: string
+  speed?: number
+  pitch?: number
+  emotion?: string
+}
+
+export interface VoicePreviewRequest {
+  text?: string
+  voice_id: string
+  speed?: number
+}
+
+export interface VoicePreviewResponse {
+  audio_url: string
+  duration: number
+  voice_id: string
+  text: string
+}
+
+export interface VoiceInfo {
+  id: string
+  name: string
+  gender: string
+  description: string
+}
+
+export interface AvailableVoicesResponse {
+  provider: string
+  voices: VoiceInfo[]
 }
 
 export interface CharacterListResponse {
@@ -248,16 +301,27 @@ export interface ShotRenderListResponse {
 // Chapter Types
 export interface ChapterCreate {
   chapter_number: number
-  title: string
+  title?: string
   content: string
+}
+
+export interface ChapterUpdate {
+  title?: string
+  content?: string
 }
 
 export interface Chapter {
   chapter_id: string
   project_id: string
   chapter_number: number
-  title: string
+  title?: string
   content: string
+  word_count: number
+  key_events: string[]
+  emotional_arc?: string
+  importance_score: number
+  suggested_episode?: number
+  characters_appeared: string[]
   status: ChapterStatus
   created_at: string
   updated_at: string
@@ -265,6 +329,110 @@ export interface Chapter {
 
 export interface ChapterListResponse {
   items: Chapter[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface ChapterAnalysisResult {
+  chapter_id: string
+  chapter_number: number
+  key_events: string[]
+  emotional_arc: string
+  importance_score: number
+  characters_appeared: string[]
+  suggested_episode?: number
+}
+
+export interface ChapterBatchAnalysisResponse {
+  analyzed_count: number
+  results: ChapterAnalysisResult[]
+}
+
+// Book Types
+export interface Book {
+  id: string
+  project_id: string
+  original_title?: string
+  author?: string
+  genre?: string
+  total_chapters: number
+  uploaded_chapters: number
+  total_words: number
+  upload_status: BookUploadStatus
+  ai_summary?: string
+  main_plot_points: string[]
+  suggested_episodes?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface BookUpdate {
+  original_title?: string
+  author?: string
+  genre?: string
+  total_chapters?: number
+}
+
+// Episode Types
+export interface EpisodePlanRequest {
+  target_episode_duration?: number
+  max_episodes?: number
+  style?: string
+}
+
+export interface EpisodeSuggestion {
+  episode_number: number
+  title: string
+  start_chapter: number
+  end_chapter: number
+  synopsis: string
+  estimated_duration_minutes: number
+}
+
+export interface EpisodePlanResponse {
+  suggested_episodes: EpisodeSuggestion[]
+  total_estimated_duration: number
+  reasoning: string
+}
+
+export interface EpisodeCreate {
+  episode_number: number
+  title?: string
+  synopsis?: string
+  start_chapter: number
+  end_chapter: number
+  target_duration_minutes?: number
+}
+
+export interface EpisodeUpdate {
+  title?: string
+  synopsis?: string
+  start_chapter?: number
+  end_chapter?: number
+  target_duration_minutes?: number
+}
+
+export interface Episode {
+  id: string
+  project_id: string
+  episode_number: number
+  title?: string
+  synopsis?: string
+  start_chapter: number
+  end_chapter: number
+  target_duration_minutes: number
+  actual_duration_minutes?: number
+  status: EpisodeStatus
+  output_video_path?: string
+  output_video_url?: string
+  episode_metadata?: Record<string, unknown>
+  created_at: string
+  updated_at: string
+}
+
+export interface EpisodeListResponse {
+  items: Episode[]
   total: number
 }
 

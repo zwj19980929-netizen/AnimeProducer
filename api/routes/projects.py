@@ -21,7 +21,7 @@ from api.schemas import (
     ShotResponse,
 )
 from core.errors import ProjectNotFoundError
-from core.models import Project, ProjectStatus, Shot, Job, Chapter, ChapterStatus, ShotRender, Character, CharacterState
+from core.models import Project, ProjectStatus, Shot, Job, Chapter, ChapterStatus, ShotRender, Character, CharacterState, Episode, Book
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -182,7 +182,15 @@ def delete_project(
         session.delete(shot)
     logger.debug(f"Deleted {len(shots)} shots for project {project_id}")
 
-    # 3. 删除 CharacterState（角色状态）- 需要先获取角色ID
+    # 3. 删除 Episode（集）
+    episodes = session.exec(
+        select(Episode).where(Episode.project_id == project_id)
+    ).all()
+    for episode in episodes:
+        session.delete(episode)
+    logger.debug(f"Deleted {len(episodes)} episodes for project {project_id}")
+
+    # 4. 删除 CharacterState（角色状态）- 需要先获取角色ID
     characters = session.exec(
         select(Character).where(Character.project_id == project_id)
     ).all()
@@ -196,12 +204,12 @@ def delete_project(
             session.delete(state)
         logger.debug(f"Deleted {len(character_states)} character states for project {project_id}")
 
-    # 4. 删除 Character（角色）
+    # 5. 删除 Character（角色）
     for character in characters:
         session.delete(character)
     logger.debug(f"Deleted {len(characters)} characters for project {project_id}")
 
-    # 5. 删除 Chapter（章节）
+    # 6. 删除 Chapter（章节）
     chapters = session.exec(
         select(Chapter).where(Chapter.project_id == project_id)
     ).all()
@@ -209,7 +217,15 @@ def delete_project(
         session.delete(chapter)
     logger.debug(f"Deleted {len(chapters)} chapters for project {project_id}")
 
-    # 6. 删除 Job（任务）
+    # 7. 删除 Book（书籍元数据）
+    book = session.exec(
+        select(Book).where(Book.project_id == project_id)
+    ).first()
+    if book:
+        session.delete(book)
+        logger.debug(f"Deleted book for project {project_id}")
+
+    # 8. 删除 Job（任务）
     jobs = session.exec(
         select(Job).where(Job.project_id == project_id)
     ).all()
@@ -311,6 +327,32 @@ def build_project_assets(
         return updated_project
     except Exception as e:
         logger.error(f"Asset build failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post(
+    "/{project_id}/assets/build-from-chapters",
+    response_model=ProjectResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def build_project_assets_from_chapters(
+    project_id: str,
+    session: DBSession,
+    director: DirectorDep,
+) -> Project:
+    """
+    Trigger: Extract characters and generate reference images from chapters.
+    Use this when the project has chapters instead of script_content.
+    """
+    logger.info(f"Triggering asset build from chapters for project: {project_id}")
+    try:
+        updated_project = director.director.build_assets_from_chapters(project_id)
+        return updated_project
+    except Exception as e:
+        logger.error(f"Asset build from chapters failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)

@@ -17,10 +17,10 @@
         />
       </n-form-item>
 
-      <n-form-item label="章节标题" path="title">
+      <n-form-item label="章节标题（可选）" path="title">
         <n-input
           v-model:value="formData.title"
-          placeholder="输入章节标题"
+          placeholder="输入章节标题（可选）"
           :maxlength="200"
           show-count
         />
@@ -86,8 +86,7 @@ const rules: FormRules = {
     { required: true, type: 'number', message: '章节编号是必需的', trigger: 'blur' }
   ],
   title: [
-    { required: true, message: '章节标题是必需的', trigger: 'blur' },
-    { min: 1, max: 200, message: '标题必须在1到200个字符之间', trigger: 'blur' }
+    { max: 200, message: '标题最多200个字符', trigger: 'blur' }
   ],
   content: [
     { required: true, message: '章节内容是必需的', trigger: 'blur' },

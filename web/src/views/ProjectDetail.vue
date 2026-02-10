@@ -77,6 +77,14 @@
                 构建资源
               </n-button>
               <n-button
+                v-if="chapterCount > 0"
+                type="info"
+                @click="handleBuildAssetsFromChapters"
+                :loading="buildingFromChapters"
+              >
+                从章节构建资源
+              </n-button>
+              <n-button
                 v-if="canGenerateStoryboard"
                 type="info"
                 @click="handleGenerateStoryboard"
@@ -92,8 +100,14 @@
             <n-tab-pane name="overview" tab="概览">
               <ProjectOverview :project="project" />
             </n-tab-pane>
+            <n-tab-pane name="book" tab="书籍">
+              <BookUpload :project-id="project.id" @chapters-updated="handleChaptersUpdated" />
+            </n-tab-pane>
             <n-tab-pane name="chapters" tab="章节">
-              <ChapterList :project-id="project.id" />
+              <ChapterList ref="chapterListRef" :project-id="project.id" />
+            </n-tab-pane>
+            <n-tab-pane name="episodes" tab="集">
+              <EpisodeList :project-id="project.id" :chapter-count="chapterCount" />
             </n-tab-pane>
             <n-tab-pane name="characters" tab="角色">
               <CharacterList :project-id="project.id" />
@@ -105,7 +119,7 @@
               <RenderList :project-id="project.id" />
             </n-tab-pane>
             <n-tab-pane name="output" tab="输出" v-if="hasOutput">
-              <VideoPlayer :src="project.output_video_path!" />
+              <VideoPlayer :src="project.output_video_url || project.output_video_path!" />
             </n-tab-pane>
           </n-tabs>
         </n-spin>
@@ -139,20 +153,24 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NSpin, NButton, NIcon, NTabs, NTabPane, NDropdown, NResult, NSpace, useDialog } from 'naive-ui'
+import { NSpin, NButton, NIcon, NTabs, NTabPane, NDropdown, NResult, NSpace, useDialog, useMessage } from 'naive-ui'
 import { useProject } from '@/composables/useProject'
 import ProjectStatusBadge from '@/components/ProjectStatusBadge.vue'
 import ProjectOverview from '@/components/ProjectOverview.vue'
+import BookUpload from '@/components/BookUpload.vue'
 import CharacterList from '@/components/CharacterList.vue'
 import ChapterList from '@/components/ChapterList.vue'
+import EpisodeList from '@/components/EpisodeList.vue'
 import ShotList from '@/components/ShotList.vue'
 import RenderList from '@/components/RenderList.vue'
 import VideoPlayer from '@/components/VideoPlayer.vue'
 import EditProjectModal from '@/components/EditProjectModal.vue'
+import { apiClient } from '@/api/client'
 
 const route = useRoute()
 const router = useRouter()
 const dialog = useDialog()
+const message = useMessage()
 const projectId = route.params.id as string
 
 const {
@@ -173,6 +191,24 @@ const {
 } = useProject(projectId)
 
 const showEditModal = ref(false)
+const chapterListRef = ref<InstanceType<typeof ChapterList> | null>(null)
+const chapterCount = ref(0)
+const buildingFromChapters = ref(false)
+
+// 加载章节数量
+async function loadChapterCount() {
+  try {
+    const response = await apiClient.listChapters(projectId)
+    chapterCount.value = response.total
+  } catch (e) {
+    // 忽略错误
+  }
+}
+
+function handleChaptersUpdated() {
+  loadChapterCount()
+  chapterListRef.value?.loadChapters?.()
+}
 
 const actionOptions = computed(() => [
   {
@@ -190,6 +226,7 @@ const actionOptions = computed(() => [
 
 onMounted(() => {
   startPolling(projectId)
+  loadChapterCount()
 })
 
 onUnmounted(() => {
@@ -202,6 +239,19 @@ async function handleRetry() {
 
 async function handleBuildAssets() {
   await buildAssets(projectId)
+}
+
+async function handleBuildAssetsFromChapters() {
+  buildingFromChapters.value = true
+  try {
+    await apiClient.buildAssetsFromChapters(projectId)
+    message.success('从章节构建资源成功')
+    await fetchProject(projectId)
+  } catch (e) {
+    message.error(`构建失败: ${(e as Error).message}`)
+  } finally {
+    buildingFromChapters.value = false
+  }
 }
 
 async function handleGenerateStoryboard() {
