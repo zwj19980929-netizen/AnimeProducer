@@ -10,10 +10,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import api_test, assets, jobs, projects
+from api.routes import api_test, assets, books, chapters, episodes, jobs, projects, ws, auth
+from api.websocket import manager as ws_manager
 from config import settings
 from core.database import init_db
 from core.errors import AnimeMatrixError
+from core.metrics import get_metrics, get_metrics_content_type
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -27,7 +29,17 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing database...")
     init_db()
     logger.info("Database initialized")
+
+    # Start WebSocket Redis listener
+    logger.info("Starting WebSocket listener...")
+    await ws_manager.start_listener()
+    logger.info("WebSocket listener started")
+
     yield
+
+    # Stop WebSocket Redis listener
+    logger.info("Stopping WebSocket listener...")
+    await ws_manager.stop_listener()
     logger.info("Shutting down AnimeMatrix...")
 
 
@@ -93,6 +105,16 @@ def health_check():
     return {"status": "healthy", "service": settings.PROJECT_NAME}
 
 
+@app.get("/metrics")
+def metrics():
+    """Prometheus metrics endpoint."""
+    from fastapi.responses import Response
+    return Response(
+        content=get_metrics(),
+        media_type=get_metrics_content_type()
+    )
+
+
 @app.get("/api/v1/info")
 def api_info():
     return {
@@ -102,9 +124,14 @@ def api_info():
     }
 
 
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
+app.include_router(chapters.router, prefix="/api/v1/projects/{project_id}/chapters", tags=["chapters"])
+app.include_router(episodes.router, prefix="/api/v1/projects/{project_id}/episodes", tags=["episodes"])
+app.include_router(books.router, prefix="/api/v1/projects/{project_id}/book", tags=["books"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(api_test.router, prefix="/api/v1/api-test", tags=["api-test"])
+app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
 app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")

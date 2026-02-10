@@ -9,6 +9,15 @@ class Settings(BaseSettings):
     API_VERSION: str = "v1"
     LOG_LEVEL: str = "INFO"
 
+    # Authentication Settings
+    AUTH_DISABLED: bool = True  # Set to False to enable authentication
+    SECRET_KEY: str = ""  # JWT secret key (auto-generated if empty)
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
+    API_KEY: str = ""  # Optional API key for service-to-service auth
+    ADMIN_USERNAME: str = "admin"
+    ADMIN_PASSWORD: str = ""  # Set to enable default admin user
+    ALLOW_REGISTRATION: bool = True  # Allow new user registration
+
     # Database
     DATABASE_URL: str = "sqlite:///./animematrix.db"
 

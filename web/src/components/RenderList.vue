@@ -70,13 +70,14 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { NSpin, NEmpty, NButton, NProgress, useMessage } from 'naive-ui'
 import { apiClient } from '@/api/client'
 import type { Job } from '@/types/api'
 import { JobStatus, JobType, ACTIVE_JOB_STATUSES } from '@/types/api'
 import JobStatusBadge from './JobStatusBadge.vue'
 import ShotRenderListModal from './ShotRenderListModal.vue'
+import { useProjectWebSocket, type WebSocketMessage } from '@/composables/useWebSocket'
 import dayjs from 'dayjs'
 
 const POLLING_INTERVAL = parseInt(import.meta.env.VITE_POLLING_INTERVAL || '3000', 10)
@@ -97,13 +98,57 @@ const hasActiveJobs = computed(() =>
   jobs.value.some(job => ACTIVE_JOB_STATUSES.includes(job.status))
 )
 
+// WebSocket for real-time updates
+const { isConnected, startListening, stopListening } = useProjectWebSocket(
+  props.projectId,
+  handleWebSocketMessage
+)
+
+function handleWebSocketMessage(msg: WebSocketMessage) {
+  if (msg.type === 'job_update' || msg.type === 'shot_render_update') {
+    // Update the specific job in our list
+    const jobId = msg.job_id as string
+    const jobIndex = jobs.value.findIndex(j => j.id === jobId)
+
+    if (jobIndex !== -1) {
+      // Update existing job
+      const updatedJob = { ...jobs.value[jobIndex] }
+      if (msg.status) updatedJob.status = msg.status as JobStatus
+      if (msg.progress !== undefined) updatedJob.progress = msg.progress as number
+      if (msg.error_message) updatedJob.error_message = msg.error_message as string
+      jobs.value[jobIndex] = updatedJob
+    } else {
+      // New job, reload the list
+      loadJobs()
+    }
+  } else if (msg.type === 'initial_state') {
+    // Initial state received, load jobs
+    loadJobs()
+  }
+}
+
 onMounted(async () => {
   await loadJobs()
+  // Try WebSocket first, fall back to polling
+  startListening()
+  // Start polling as fallback (will be less frequent if WebSocket is connected)
   startPolling()
 })
 
 onUnmounted(() => {
   stopPolling()
+  stopListening()
+})
+
+// Watch WebSocket connection status
+watch(isConnected, (connected) => {
+  if (connected) {
+    // WebSocket connected, we can reduce polling frequency or stop it
+    stopPolling()
+  } else {
+    // WebSocket disconnected, resume polling
+    startPolling()
+  }
 })
 
 async function loadJobs() {

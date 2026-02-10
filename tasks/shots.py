@@ -10,7 +10,9 @@ from core.database import engine
 from core.models import Shot, ShotRender, ShotRenderStatus, Character, Job, JobStatus
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
+from core.cache import cache, is_job_cancelled_cached
 from tasks.celery_app import celery_app
+from api.websocket import publish_job_update_sync, publish_shot_render_update_sync
 
 logger = logging.getLogger(__name__)
 
@@ -21,17 +23,8 @@ pipeline = ShotPipeline(
 
 
 def is_job_cancelled(project_id: str) -> bool:
-    """检查项目的渲染任务是否已被取消。"""
-    try:
-        with Session(engine) as session:
-            job = session.query(Job).filter(
-                Job.project_id == project_id
-            ).order_by(Job.created_at.desc()).first()
-            if job and job.status == JobStatus.REVOKED:
-                return True
-    except Exception as e:
-        logger.warning(f"Failed to check job status: {e}")
-    return False
+    """检查项目的渲染任务是否已被取消（使用缓存优化）。"""
+    return is_job_cancelled_cached(project_id)
 
 
 def get_reference_image_for_shot(shot: Shot, session: Session) -> Optional[str]:
@@ -54,9 +47,11 @@ def update_render_status(
         status: ShotRenderStatus,
         progress: float = 0.0,
         result_paths: Dict[str, str] = None,
-        error: str = None
+        error: str = None,
+        project_id: str = None,
+        job_id: str = None
 ):
-    """更新数据库中的渲染状态。"""
+    """更新数据库中的渲染状态，并发布 WebSocket 更新。"""
     try:
         with Session(engine) as session:
             render = session.get(ShotRender, render_id)
@@ -75,6 +70,20 @@ def update_render_status(
                 render.updated_at = datetime.utcnow()
                 session.add(render)
                 session.commit()
+
+                # Publish WebSocket update
+                if project_id and job_id:
+                    publish_shot_render_update_sync(
+                        render_id=render_id,
+                        job_id=job_id,
+                        project_id=project_id,
+                        data={
+                            "status": status.value if hasattr(status, 'value') else status,
+                            "progress": progress,
+                            "error_message": error,
+                            "result_paths": result_paths,
+                        }
+                    )
     except Exception as e:
         logger.error(f"Failed to update render status: {e}")
 
@@ -111,9 +120,13 @@ def render_shot(self, shot_id: int):
 
         render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
         render_id = render_record.id if render_record else None
+        job_id = render_record.job_id if render_record else None
 
     if render_id:
-        update_render_status(render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1)
+        update_render_status(
+            render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1,
+            project_id=project_id, job_id=job_id
+        )
 
     try:
         logger.info(f"Processing shot {shot_id} via ShotPipeline...")
@@ -135,7 +148,10 @@ def render_shot(self, shot_id: int):
         }
 
         if render_id:
-            update_render_status(render_id, ShotRenderStatus.SUCCESS, 1.0, result_paths)
+            update_render_status(
+                render_id, ShotRenderStatus.SUCCESS, 1.0, result_paths,
+                project_id=project_id, job_id=job_id
+            )
 
         duration = (datetime.utcnow() - start_time).total_seconds()
         logger.info(f"Shot {shot_id} finished in {duration:.2f}s. Video: {artifact.video_path}")
@@ -153,5 +169,8 @@ def render_shot(self, shot_id: int):
         error_msg = f"Pipeline failed: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_msg)
         if render_id:
-            update_render_status(render_id, ShotRenderStatus.FAILURE, error=str(e))
+            update_render_status(
+                render_id, ShotRenderStatus.FAILURE, error=str(e),
+                project_id=project_id, job_id=job_id
+            )
         raise e

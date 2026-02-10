@@ -1,8 +1,9 @@
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useProjectStore } from '@/stores/project'
 import type { Project, ProjectCreate, ProjectUpdate, PipelineStartResponse } from '@/types/api'
+import { useProjectWebSocket, type WebSocketMessage } from '@/composables/useWebSocket'
 
 const POLLING_INTERVAL = parseInt(import.meta.env.VITE_POLLING_INTERVAL || '3000', 10)
 
@@ -26,6 +27,18 @@ export function useProject(projectId?: string) {
   } = storeToRefs(store)
 
   const shouldPoll = computed(() => isProcessing.value)
+
+  // WebSocket connection (will be initialized when startPolling is called)
+  let wsConnection: ReturnType<typeof useProjectWebSocket> | null = null
+
+  function handleWebSocketMessage(msg: WebSocketMessage) {
+    if (msg.type === 'project_update' || msg.type === 'job_update') {
+      // Refresh project data when we receive an update
+      if (project.value?.id) {
+        store.fetchProject(project.value.id)
+      }
+    }
+  }
 
   async function fetchProject(id: string): Promise<Project | null> {
     const result = await store.fetchProject(id)
@@ -101,8 +114,15 @@ export function useProject(projectId?: string) {
 
   function startPolling(id: string): void {
     stopPolling()
+
+    // Initialize WebSocket connection
+    wsConnection = useProjectWebSocket(id, handleWebSocketMessage)
+    wsConnection.startListening()
+
+    // Start polling as fallback (only when WebSocket is not connected)
     pollingIntervalId.value = window.setInterval(() => {
-      if (shouldPoll.value) {
+      // Only poll if WebSocket is not connected and we should be polling
+      if (shouldPoll.value && !wsConnection?.isConnected.value) {
         store.fetchProject(id)
       }
     }, POLLING_INTERVAL)
@@ -112,6 +132,11 @@ export function useProject(projectId?: string) {
     if (pollingIntervalId.value !== null) {
       clearInterval(pollingIntervalId.value)
       pollingIntervalId.value = null
+    }
+    // Stop WebSocket connection
+    if (wsConnection) {
+      wsConnection.stopListening()
+      wsConnection = null
     }
   }
 

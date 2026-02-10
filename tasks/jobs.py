@@ -7,9 +7,11 @@ from celery import chord
 from sqlmodel import Session, select
 
 from core.database import engine
-from core.models import Shot, Project, ProjectStatus, Job, JobStatus
+from core.models import Shot, Project, ProjectStatus, Job, JobStatus, Episode, EpisodeStatus
 from core.editor import assemble_shots, ShotArtifact, AlignmentStrategy
+from core.cache import cache
 from tasks.celery_app import celery_app
+from api.websocket import publish_job_update_sync
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +21,21 @@ def render_project_job(self, project_id: str):
     """编排整个项目的渲染任务。"""
     logger.info(f"Dispatching render job for project: {project_id}")
 
+    job_id = None
     with Session(engine) as session:
         job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
         if job:
             job.status = JobStatus.STARTED
             job.started_at = datetime.utcnow()
+            job_id = job.id
             session.add(job)
             session.commit()
+
+            # Publish WebSocket update
+            publish_job_update_sync(job_id, project_id, {
+                "status": JobStatus.STARTED.value,
+                "progress": 0.0,
+            })
 
         shots = session.exec(select(Shot).where(Shot.project_id == project_id).order_by(Shot.sequence_order)).all()
         shot_ids = [shot.shot_id for shot in shots]
@@ -39,6 +49,12 @@ def render_project_job(self, project_id: str):
                 job.error_message = "No shots found for rendering"
                 job.completed_at = datetime.utcnow()
                 session.add(job)
+
+                # Publish WebSocket update
+                publish_job_update_sync(job.id, project_id, {
+                    "status": JobStatus.FAILURE.value,
+                    "error_message": "No shots found for rendering",
+                })
 
             project = session.get(Project, project_id)
             if project:
@@ -88,6 +104,12 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 job.error_message = "All shots failed to render"
                 job.completed_at = datetime.utcnow()
                 session.add(job)
+
+                # Publish WebSocket update
+                publish_job_update_sync(job.id, project_id, {
+                    "status": JobStatus.FAILURE.value,
+                    "error_message": "All shots failed to render",
+                })
 
             session.commit()
         return {"status": "failed", "reason": "No valid shots"}
@@ -151,6 +173,14 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 job.completed_at = datetime.utcnow()
                 session.add(job)
 
+                # Publish WebSocket update
+                publish_job_update_sync(job.id, project_id, {
+                    "status": JobStatus.SUCCESS.value,
+                    "progress": 1.0,
+                    "output_video_path": final_video_path,
+                    "output_video_url": output_video_url,
+                })
+
             session.commit()
 
         logger.info(f"Project composition complete! Saved to: {final_video_path}")
@@ -166,6 +196,219 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 session.add(project)
 
             job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            if job:
+                job.status = JobStatus.FAILURE
+                job.error_message = str(e)
+                job.completed_at = datetime.utcnow()
+                session.add(job)
+
+                # Publish WebSocket update
+                publish_job_update_sync(job.id, project_id, {
+                    "status": JobStatus.FAILURE.value,
+                    "error_message": str(e),
+                })
+
+            session.commit()
+        raise e
+
+
+@celery_app.task(bind=True, name="tasks.jobs.render_episode_job", task_acks_late=False)
+def render_episode_job(self, project_id: str, episode_id: str):
+    """编排单集的渲染任务。"""
+    logger.info(f"Dispatching render job for episode: {episode_id} in project: {project_id}")
+
+    with Session(engine) as session:
+        # 获取集信息
+        episode = session.get(Episode, episode_id)
+        if not episode:
+            logger.error(f"Episode not found: {episode_id}")
+            return {"status": "failed", "reason": "Episode not found"}
+
+        # 更新任务状态
+        job = session.query(Job).filter(
+            Job.project_id == project_id,
+            Job.result.contains({"episode_id": episode_id})
+        ).order_by(Job.created_at.desc()).first()
+
+        if job:
+            job.status = JobStatus.STARTED
+            job.started_at = datetime.utcnow()
+            session.add(job)
+            session.commit()
+
+        # 获取该集的分镜
+        shots = session.exec(
+            select(Shot).where(Shot.episode_id == episode_id).order_by(Shot.sequence_order)
+        ).all()
+        shot_ids = [shot.shot_id for shot in shots]
+
+    if not shot_ids:
+        logger.warning(f"No shots found for episode {episode_id}!")
+        with Session(engine) as session:
+            episode = session.get(Episode, episode_id)
+            if episode:
+                episode.status = EpisodeStatus.FAILED
+                session.add(episode)
+
+            job = session.query(Job).filter(
+                Job.project_id == project_id,
+                Job.result.contains({"episode_id": episode_id})
+            ).order_by(Job.created_at.desc()).first()
+
+            if job:
+                job.status = JobStatus.FAILURE
+                job.error_message = "No shots found for rendering"
+                job.completed_at = datetime.utcnow()
+                session.add(job)
+
+            session.commit()
+        return {"status": "failed", "reason": "No shots found"}
+
+    from tasks.shots import render_shot
+
+    header = [render_shot.s(sid) for sid in shot_ids]
+    callback = compose_episode.s(project_id, episode_id)
+
+    workflow = chord(header)(callback)
+    logger.info(f"Episode workflow started. Chord ID: {workflow.id}")
+    return {"chord_id": workflow.id, "episode_id": episode_id}
+
+
+@celery_app.task(bind=True, name="tasks.jobs.compose_episode", task_acks_late=False)
+def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id: str):
+    """单集合成任务：收集所有 Shot 结果并拼接为一集视频。"""
+    logger.info(f"Composing episode: {episode_id} for project: {project_id}")
+
+    # 检查任务是否被取消
+    with Session(engine) as session:
+        job = session.query(Job).filter(
+            Job.project_id == project_id,
+            Job.result.contains({"episode_id": episode_id})
+        ).order_by(Job.created_at.desc()).first()
+
+        if job and job.status == JobStatus.REVOKED:
+            logger.info(f"Composition skipped - job was cancelled for episode: {episode_id}")
+            return {"status": "cancelled", "reason": "Job was cancelled"}
+
+        episode = session.get(Episode, episode_id)
+        episode_number = episode.episode_number if episode else 0
+
+    valid_results = [r for r in shot_results if r and r.get("status") == "completed"]
+
+    if not valid_results:
+        logger.error(f"No valid shots to compose for episode {episode_id}!")
+        with Session(engine) as session:
+            episode = session.get(Episode, episode_id)
+            if episode:
+                episode.status = EpisodeStatus.FAILED
+                session.add(episode)
+
+            job = session.query(Job).filter(
+                Job.project_id == project_id,
+                Job.result.contains({"episode_id": episode_id})
+            ).order_by(Job.created_at.desc()).first()
+
+            if job:
+                job.status = JobStatus.FAILURE
+                job.error_message = "All shots failed to render"
+                job.completed_at = datetime.utcnow()
+                session.add(job)
+
+            session.commit()
+        return {"status": "failed", "reason": "No valid shots"}
+
+    valid_results.sort(key=lambda x: x["shot_id"])
+
+    artifacts = []
+    for res in valid_results:
+        artifacts.append(ShotArtifact(
+            shot_id=res["shot_id"],
+            video_path=res["video_path"],
+            audio_path=res.get("audio_path"),
+            dialogue=res.get("dialogue"),
+            start_time=0,
+            end_time=res.get("duration", 3.0)
+        ))
+
+    try:
+        from config import settings
+        output_dir = settings.OUTPUT_DIR
+        output_filename = f"episode_{episode_number}_project_{project_id}.mp4"
+        output_path = os.path.join(output_dir, output_filename)
+
+        final_video_path = assemble_shots(
+            shots=artifacts,
+            output_path=output_path,
+            alignment_strategy=AlignmentStrategy.LOOP,
+            crossfade_duration=0.5
+        )
+
+        # 计算实际时长
+        actual_duration = sum(res.get("duration", 3.0) for res in valid_results)
+
+        # 上传到 OSS（如果已配置）
+        output_video_url = None
+        try:
+            from integrations.oss_service import OSSService
+            oss = OSSService.get_instance()
+            if oss.is_configured():
+                logger.info(f"正在上传第 {episode_number} 集视频到 OSS...")
+                with open(final_video_path, 'rb') as f:
+                    video_data = f.read()
+                output_video_url = oss.upload_video_bytes(
+                    video_data,
+                    filename=f"episode_{episode_number}_project_{project_id}",
+                    ext=".mp4"
+                )
+                logger.info(f"视频已上传到 OSS: {output_video_url}")
+        except Exception as oss_err:
+            logger.warning(f"OSS 上传失败，视频仅保存在本地: {oss_err}")
+
+        with Session(engine) as session:
+            episode = session.get(Episode, episode_id)
+            if episode:
+                episode.status = EpisodeStatus.DONE
+                episode.output_video_path = final_video_path
+                episode.output_video_url = output_video_url
+                episode.actual_duration_minutes = actual_duration / 60.0
+                episode.updated_at = datetime.utcnow()
+                session.add(episode)
+
+            job = session.query(Job).filter(
+                Job.project_id == project_id,
+                Job.result.contains({"episode_id": episode_id})
+            ).order_by(Job.created_at.desc()).first()
+
+            if job:
+                job.status = JobStatus.SUCCESS
+                job.progress = 1.0
+                job.completed_at = datetime.utcnow()
+                session.add(job)
+
+            session.commit()
+
+        logger.info(f"Episode {episode_number} composition complete! Saved to: {final_video_path}")
+        return {
+            "status": "success",
+            "path": final_video_path,
+            "url": output_video_url,
+            "episode_number": episode_number,
+            "duration_minutes": actual_duration / 60.0
+        }
+
+    except Exception as e:
+        logger.error(f"Episode composition failed: {e}")
+        with Session(engine) as session:
+            episode = session.get(Episode, episode_id)
+            if episode:
+                episode.status = EpisodeStatus.FAILED
+                session.add(episode)
+
+            job = session.query(Job).filter(
+                Job.project_id == project_id,
+                Job.result.contains({"episode_id": episode_id})
+            ).order_by(Job.created_at.desc()).first()
+
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = str(e)
