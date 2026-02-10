@@ -28,11 +28,23 @@ class ConnectionManager:
     async def _get_redis(self) -> aioredis.Redis:
         """Get or create Redis connection."""
         if self._redis is None:
-            self._redis = await aioredis.from_url(
-                settings.REDIS_URL,
-                encoding="utf-8",
-                decode_responses=True
-            )
+            try:
+                self._redis = await asyncio.wait_for(
+                    aioredis.from_url(
+                        settings.REDIS_URL,
+                        encoding="utf-8",
+                        decode_responses=True,
+                        socket_connect_timeout=5,
+                        socket_timeout=5
+                    ),
+                    timeout=5.0
+                )
+                # Test connection
+                await self._redis.ping()
+            except Exception as e:
+                logger.warning(f"Failed to connect to Redis: {e}")
+                self._redis = None
+                raise
         return self._redis
 
     async def start_listener(self):
@@ -40,11 +52,15 @@ class ConnectionManager:
         if self._listener_task is not None:
             return
 
-        redis = await self._get_redis()
-        self._pubsub = redis.pubsub()
-        await self._pubsub.psubscribe("job:*", "project:*")
-        self._listener_task = asyncio.create_task(self._listen_redis())
-        logger.info("WebSocket Redis listener started")
+        try:
+            redis = await self._get_redis()
+            self._pubsub = redis.pubsub()
+            await self._pubsub.psubscribe("job:*", "project:*")
+            self._listener_task = asyncio.create_task(self._listen_redis())
+            logger.info("WebSocket Redis listener started")
+        except Exception as e:
+            logger.warning(f"WebSocket Redis listener failed to start (Redis unavailable): {e}")
+            logger.info("WebSocket will work without Redis pub/sub - falling back to polling")
 
     async def stop_listener(self):
         """Stop the Redis pub/sub listener."""
