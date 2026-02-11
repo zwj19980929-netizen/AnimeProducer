@@ -24,7 +24,25 @@
       "Bash(git -C \"D:\\\\zwj_project\\\\AnimeProducer\" diff --stat)",
       "Bash(git -C \"D:\\\\zwj_project\\\\AnimeProducer\" log --oneline -5)",
       "Bash(git -C \"D:\\\\zwj_project\\\\AnimeProducer\" commit -m \"$\\(cat <<''EOF''\nfeat: OSS云存储集成、代理优化与智谱TTS修复\n\n主要更新:\n- 新增阿里云OSS服务，支持图片和视频上传到云端\n- 关键帧图片优先上传OSS，节省本地存储空间\n- 最终合成视频上传OSS，前端可直接播放/下载\n- 修复国内API代理问题，所有阿里云相关请求禁用代理\n- 重写智谱TTS客户端，使用GLM-4-Voice模型\n- 新增API测试页面，支持测试各厂商API连通性\n- 音频生成器自动检测格式\\(WAV/MP3\\)并保存正确扩展名\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
-      "Bash(git -C \"D:\\\\zwj_project\\\\AnimeProducer\" push origin main)"
+      "Bash(git -C \"D:\\\\zwj_project\\\\AnimeProducer\" push origin main)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(tasklist:*)",
+      "Bash(python -m migrations.add_book_episode_tables:*)",
+      "Bash(npm run build:*)",
+      "Bash(npx vite build)",
+      "Bash(wmic process:*)",
+      "Bash(.venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(dir:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(grep:*)",
+      "Bash(done)",
+      "Bash(python -m migrations.add_character_image_gallery:*)",
+      "Bash(npx vue-tsc:*)",
+      "Bash(D:)",
+      "Bash(cmd /c:*)",
+      "Bash(powershell -Command \"cd D:\\\\zwj_project\\\\AnimeProducer; python migrations/add_character_aliases.py\")",
+      "Bash(powershell -Command:*)"
     ]
   }
 }

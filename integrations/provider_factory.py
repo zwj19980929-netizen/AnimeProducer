@@ -1,17 +1,24 @@
 """
 Provider Factory - 多厂商模型网关
 支持 Google、Replicate、火山引擎、阿里万相、豆包、DeepSeek 等
+
+集成限流、熔断和故障转移机制。
 """
 import logging
 from typing import List, Optional, Dict, Any
 
 from config import settings
 from integrations.base_client import (
-    BaseImageClient, 
-    BaseVideoClient, 
+    BaseImageClient,
+    BaseVideoClient,
     BaseLLMClient,
     QuotaExceededError,
     AuthenticationError
+)
+from core.rate_limiter import (
+    failover_manager,
+    RateLimiterRegistry,
+    CircuitBreakerRegistry,
 )
 
 logger = logging.getLogger(__name__)
@@ -219,3 +226,55 @@ class ProviderFactory:
             "llm": ["google", "doubao", "deepseek", "openai"],
             "tts": ["openai", "doubao", "aliyun", "minimax", "zhipu"]
         }
+
+    # ========== Smart Failover Methods ==========
+
+    @classmethod
+    def get_image_client_with_failover(cls) -> BaseImageClient:
+        """
+        获取图像客户端（带智能故障转移）
+
+        自动选择健康的 Provider，失败时切换到备用。
+        """
+        primary = settings.IMAGE_PROVIDER
+        backups = cls.get_backup_image_providers()
+
+        selected = failover_manager.select_provider(primary, backups)
+        return cls.get_image_client(selected)
+
+    @classmethod
+    def get_video_client_with_failover(cls) -> BaseVideoClient:
+        """
+        获取视频客户端（带智能故障转移）
+        """
+        primary = settings.VIDEO_PROVIDER
+        backups = cls.get_backup_video_providers()
+
+        selected = failover_manager.select_provider(primary, backups)
+        return cls.get_video_client(selected)
+
+    @classmethod
+    def get_llm_client_with_failover(cls) -> BaseLLMClient:
+        """
+        获取 LLM 客户端（带智能故障转移）
+        """
+        primary = settings.LLM_PROVIDER
+        backups = cls.get_backup_llm_providers()
+
+        selected = failover_manager.select_provider(primary, backups)
+        return cls.get_llm_client(selected)
+
+    @classmethod
+    def record_success(cls, provider_type: str, provider: str):
+        """记录 Provider 调用成功"""
+        failover_manager.record_success(f"{provider_type}_{provider}")
+
+    @classmethod
+    def record_failure(cls, provider_type: str, provider: str):
+        """记录 Provider 调用失败"""
+        failover_manager.record_failure(f"{provider_type}_{provider}")
+
+    @classmethod
+    def get_provider_status(cls) -> Dict[str, Any]:
+        """获取所有 Provider 的健康状态"""
+        return failover_manager.get_status()

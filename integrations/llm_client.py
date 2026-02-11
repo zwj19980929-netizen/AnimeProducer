@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 from typing import Type, TypeVar
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
@@ -102,8 +104,50 @@ class LLMClient:
         try:
             return chain.invoke({"prompt": prompt, "format_instructions": format_instructions})
         except Exception as e:
-            logger.error(f"Error calling LLM: {e}")
-            return None
+            logger.warning(f"Pydantic parser failed: {e}, trying manual JSON extraction...")
+            # 尝试手动提取 JSON
+            try:
+                raw_chain = chat_prompt | llm_with_temp
+                raw_response = raw_chain.invoke({"prompt": prompt, "format_instructions": format_instructions})
+                content = raw_response.content if raw_response else ""
+                logger.debug(f"Raw LLM response: {content[:1000]}")
+
+                # 尝试从响应中提取 JSON
+                json_obj = self._extract_json(content)
+                if json_obj:
+                    return pydantic_model.model_validate(json_obj)
+                else:
+                    logger.error(f"Could not extract JSON from response")
+                    return None
+            except Exception as e2:
+                logger.error(f"Manual JSON extraction also failed: {e2}", exc_info=True)
+                return None
+
+    def _extract_json(self, text: str) -> dict | None:
+        """从文本中提取 JSON 对象"""
+        # 尝试直接解析
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 尝试提取 ```json ... ``` 代码块
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # 尝试提取 { ... } 块
+        brace_match = re.search(r'\{[\s\S]*\}', text)
+        if brace_match:
+            try:
+                return json.loads(brace_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        return None
 
 
 llm_client = LLMClient()

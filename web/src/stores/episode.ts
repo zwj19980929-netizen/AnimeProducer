@@ -7,15 +7,17 @@ import type {
   EpisodeUpdate,
   EpisodePlanRequest,
   EpisodePlanResponse,
-  EpisodeSuggestion
+  EpisodeSuggestion,
+  Job
 } from '@/types/api'
-import { EpisodeStatus } from '@/types/api'
+import { EpisodeStatus, JobStatus } from '@/types/api'
 
 export const useEpisodeStore = defineStore('episode', () => {
   // State
   const episodes = ref<Episode[]>([])
   const currentEpisode = ref<Episode | null>(null)
   const episodePlan = ref<EpisodePlanResponse | null>(null)
+  const planningJob = ref<Job | null>(null)
   const loading = ref(false)
   const error = ref<string | null>(null)
 
@@ -68,18 +70,78 @@ export const useEpisodeStore = defineStore('episode', () => {
 
   async function planEpisodes(
     projectId: string,
-    options?: EpisodePlanRequest
+    options?: EpisodePlanRequest,
+    onProgress?: (job: Job) => void
   ): Promise<EpisodePlanResponse | null> {
     loading.value = true
     error.value = null
+    planningJob.value = null
+    episodePlan.value = null
+
     try {
-      episodePlan.value = await apiClient.planEpisodes(projectId, options)
-      return episodePlan.value
+      // 启动异步规划任务
+      const job = await apiClient.planEpisodes(projectId, options)
+      planningJob.value = job
+
+      // 轮询等待任务完成
+      const result = await pollPlanningJob(projectId, job.id, onProgress)
+      if (result) {
+        episodePlan.value = result
+      }
+      return result
     } catch (e) {
       error.value = (e as Error).message
       return null
     } finally {
       loading.value = false
+      planningJob.value = null
+    }
+  }
+
+  async function pollPlanningJob(
+    projectId: string,
+    jobId: string,
+    onProgress?: (job: Job) => void
+  ): Promise<EpisodePlanResponse | null> {
+    const maxAttempts = 120 // 最多轮询 10 分钟 (120 * 5s)
+    const pollInterval = 5000 // 5 秒
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const job = await apiClient.getJob(jobId)
+        planningJob.value = job
+
+        if (onProgress) {
+          onProgress(job)
+        }
+
+        if (job.status === JobStatus.SUCCESS) {
+          // 获取规划结果
+          return await apiClient.getPlanResult(projectId, jobId)
+        } else if (job.status === JobStatus.FAILURE) {
+          error.value = job.error_message || '规划失败'
+          return null
+        } else if (job.status === JobStatus.REVOKED) {
+          error.value = '任务已取消'
+          return null
+        }
+
+        // 等待下一次轮询
+        await new Promise(resolve => setTimeout(resolve, pollInterval))
+      } catch (e) {
+        error.value = (e as Error).message
+        return null
+      }
+    }
+
+    error.value = '规划超时'
+    return null
+  }
+
+  function cancelPlanning() {
+    if (planningJob.value) {
+      apiClient.cancelJob(planningJob.value.id).catch(console.error)
+      planningJob.value = null
     }
   }
 
@@ -232,6 +294,7 @@ export const useEpisodeStore = defineStore('episode', () => {
     episodes,
     currentEpisode,
     episodePlan,
+    planningJob,
     loading,
     error,
     // Getters
@@ -245,6 +308,7 @@ export const useEpisodeStore = defineStore('episode', () => {
     fetchEpisodes,
     fetchEpisode,
     planEpisodes,
+    cancelPlanning,
     confirmEpisodePlan,
     createEpisode,
     updateEpisode,

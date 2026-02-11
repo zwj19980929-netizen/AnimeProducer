@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import api_test, assets, books, chapters, episodes, jobs, projects, ws, auth
+from api.routes import api_test, assets, books, chapters, episodes, jobs, projects, ws, auth, lora
 from api.websocket import manager as ws_manager
 from config import settings
 from core.database import init_db
@@ -131,6 +131,7 @@ app.include_router(episodes.router, prefix="/api/v1/projects/{project_id}/episod
 app.include_router(books.router, prefix="/api/v1/projects/{project_id}/book", tags=["books"])
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
+app.include_router(lora.router, prefix="/api/v1/lora", tags=["lora"])
 app.include_router(api_test.router, prefix="/api/v1/api-test", tags=["api-test"])
 app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 

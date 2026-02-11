@@ -7,20 +7,34 @@ from typing import Optional, Dict, Any
 
 class BaseImageClient(ABC):
     """Base interface for image generation clients."""
-    
+
     provider_name: str = "base"
-    
+
     @abstractmethod
     def generate_image(
         self,
         prompt: str,
         reference_image_path: Optional[str] = None,
         style_preset: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
         **kwargs
     ) -> bytes:
-        """Generate an image from prompt."""
+        """Generate an image from prompt.
+
+        Args:
+            prompt: The main prompt describing what to generate
+            reference_image_path: Optional path to a reference image
+            style_preset: Optional style preset (e.g., "anime style")
+            negative_prompt: Optional negative prompt describing what to avoid
+            seed: Optional random seed for reproducibility
+            **kwargs: Additional provider-specific parameters
+
+        Returns:
+            Image bytes data
+        """
         pass
-    
+
     def health_check(self) -> bool:
         """Check if the provider is available."""
         return True

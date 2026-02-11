@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -32,16 +32,70 @@ class Storyboard(BaseModel):
     shots: List[ShotDraft]
 
 
+# 预设风格配置
+STYLE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "ancient_chinese_wuxia": {
+        "name": "Ancient Chinese Wuxia",
+        "guidelines": "Ancient Chinese Wuxia martial arts world",
+        "forbidden": ["cars", "phones", "modern clothes", "glasses", "concrete walls", "electricity", "plastic", "modern buildings"],
+        "mandatory_atmosphere": "Ethereal, misty, historical",
+        "default_props": "wooden ming-dynasty furniture, silk robes, bamboo, paper lanterns, ink paintings",
+    },
+    "cyberpunk": {
+        "name": "Cyberpunk",
+        "guidelines": "Neon-lit dystopian future",
+        "forbidden": ["nature", "clean environments", "traditional clothing"],
+        "mandatory_atmosphere": "Dark, neon, rain-soaked",
+        "default_props": "holographic displays, cybernetic implants, flying vehicles",
+    },
+    "modern_urban": {
+        "name": "Modern Urban",
+        "guidelines": "Contemporary city setting",
+        "forbidden": [],
+        "mandatory_atmosphere": "Realistic, contemporary",
+        "default_props": "modern furniture, smartphones, cars",
+    },
+}
+
+
 class ScriptParser:
     def __init__(self):
         from integrations.llm_client import llm_client
         self.llm = llm_client
 
-    def parse_novel_to_storyboard(self, novel_text: str) -> List[ShotDraft]:
-        """将小说文本解析为分镜列表"""
-        prompt = f"""
+    def parse_novel_to_storyboard(
+        self,
+        novel_text: str,
+        style_config: Optional[Dict[str, Any]] = None
+    ) -> List[ShotDraft]:
+        """
+        将小说文本解析为分镜列表。
+
+        Args:
+            novel_text: 小说文本
+            style_config: 风格配置，可以是预设名称或自定义配置
+                - preset: 预设名称 (ancient_chinese_wuxia, cyberpunk, modern_urban)
+                - guidelines: 全局美术风格指导
+                - forbidden: 禁止出现的元素列表
+                - mandatory_atmosphere: 必须的氛围
+                - default_props: 默认道具描述
+
+        Returns:
+            分镜列表
+        """
+        # 构建风格指导
+        style_guidelines = self._build_style_guidelines(style_config)
+
+        prompt = f"""{style_guidelines}
+
 You are a professional movie director and storyboard artist.
 Convert the following novel text into a detailed storyboard (list of shots).
+
+**CRITICAL RULES (铁律):**
+1. FORBIDDEN: Do not create shots where characters just stand and talk while a narrator speaks the internal monologue.
+2. REQUIRED: Every shot must have MOVEMENT - characters must be DOING something visible.
+3. REQUIRED: Every visual description MUST align with the GLOBAL ART STYLE above.
+4. If the text is generic (e.g. "he sat down"), you MUST describe specific period-appropriate details.
 
 Rules:
 1. Break down the text into visual shots (aim for 5-15 shots depending on content length).
@@ -98,6 +152,44 @@ Novel Text:
         except Exception as e:
             logger.error(f"Failed to parse script: {e}")
             return []
+
+    def _build_style_guidelines(self, style_config: Optional[Dict[str, Any]]) -> str:
+        """构建风格指导文本。"""
+        if not style_config:
+            return ""
+
+        # 如果指定了预设
+        preset_name = style_config.get("preset")
+        if preset_name and preset_name in STYLE_PRESETS:
+            config = STYLE_PRESETS[preset_name].copy()
+            # 允许覆盖预设值
+            config.update({k: v for k, v in style_config.items() if k != "preset" and v})
+        else:
+            config = style_config
+
+        guidelines = config.get("guidelines", "")
+        forbidden = config.get("forbidden", [])
+        atmosphere = config.get("mandatory_atmosphere", "")
+        default_props = config.get("default_props", "")
+
+        parts = ["=== GLOBAL ART DIRECTION ==="]
+
+        if guidelines:
+            parts.append(f"GLOBAL ART STYLE: {guidelines}")
+
+        if forbidden:
+            forbidden_str = ", ".join(forbidden)
+            parts.append(f"FORBIDDEN ELEMENTS (never include): {forbidden_str}")
+
+        if atmosphere:
+            parts.append(f"MANDATORY ATMOSPHERE: {atmosphere}")
+
+        if default_props:
+            parts.append(f"DEFAULT PROPS/SETTING: {default_props}")
+
+        parts.append("=" * 30)
+
+        return "\n".join(parts)
 
     def analyze_dialogue_emotion(self, dialogue: str, context: str = "") -> dict:
         """

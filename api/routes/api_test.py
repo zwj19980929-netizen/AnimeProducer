@@ -823,3 +823,29 @@ def _test_vlm_provider(provider: str) -> ProviderTestResult:
             message=str(e),
             latency_ms=latency_ms,
         )
+
+
+# =============================================================================
+# Provider Health Status
+# =============================================================================
+
+class ProviderHealthStatus(BaseModel):
+    """Provider health status."""
+    is_healthy: bool
+    consecutive_failures: int
+    failure_rate: float
+    total_requests: int
+    last_failure: str | None = None
+    last_success: str | None = None
+
+
+@router.get("/provider-status", response_model=dict[str, ProviderHealthStatus])
+def get_provider_status() -> dict[str, ProviderHealthStatus]:
+    """Get health status of all providers."""
+    from core.rate_limiter import failover_manager
+
+    status = failover_manager.get_status()
+    return {
+        name: ProviderHealthStatus(**data)
+        for name, data in status.items()
+    }

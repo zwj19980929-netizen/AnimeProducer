@@ -54,8 +54,24 @@ class GenClient:
 
         return enhanced_prompt
 
-    def generate_image(self, prompt: str, reference_image_path: str = None, style_preset: str = None) -> Optional[bytes]:
-        """使用 Google Imagen 模型生成图像。"""
+    def generate_image(
+        self,
+        prompt: str,
+        reference_image_path: str = None,
+        style_preset: str = None,
+        negative_prompt: str = None,
+        seed: int = None,
+        **kwargs
+    ) -> Optional[bytes]:
+        """使用 Google Imagen 模型生成图像。
+
+        Args:
+            prompt: 主提示词
+            reference_image_path: 参考图路径（可选）
+            style_preset: 风格预设（可选）
+            negative_prompt: 负面提示词，描述不想要的内容（可选）
+            seed: 随机种子，用于复现结果（可选）
+        """
         if not self.client:
             logger.error("Cannot generate image: Client not initialized.")
             return None
@@ -67,18 +83,33 @@ class GenClient:
 
         logger.info(f"Generating image with Google GenAI ({self.model_name})...")
         logger.debug(f"Prompt: {enhanced_prompt}")
+        if negative_prompt:
+            logger.debug(f"Negative prompt: {negative_prompt}")
+        if seed is not None:
+            logger.debug(f"Seed: {seed}")
         if reference_image_path:
             logger.debug(f"Reference image: {reference_image_path}")
 
         try:
+            # 构建配置
+            config_params = {
+                "number_of_images": 1,
+                "aspect_ratio": "1:1",
+                "safety_filter_level": "BLOCK_LOW_AND_ABOVE",
+            }
+
+            # Google Imagen 4.0 支持 negative_prompt
+            if negative_prompt:
+                config_params["negative_prompt"] = negative_prompt
+
+            # Google Imagen 支持 seed 参数
+            if seed is not None:
+                config_params["seed"] = seed
+
             response = self.client.models.generate_images(
                 model=self.model_name,
                 prompt=enhanced_prompt,
-                config=types.GenerateImagesConfig(
-                    number_of_images=1,
-                    aspect_ratio="1:1",
-                    safety_filter_level="BLOCK_LOW_AND_ABOVE",
-                )
+                config=types.GenerateImagesConfig(**config_params)
             )
 
             if response.generated_images:

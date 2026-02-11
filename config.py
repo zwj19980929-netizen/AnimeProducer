@@ -156,6 +156,21 @@ class Settings(BaseSettings):
     # ========== Alignment Strategy Settings ==========
     DEFAULT_ALIGNMENT_STRATEGY: str = "smooth_slow_motion"  # slow_motion, loop, smooth_slow_motion, freeze_frame, extend
 
+    # ========== LoRA Training Settings ==========
+    LORA_TRAINING_ENABLED: bool = True  # 是否启用 LoRA 训练
+    LORA_TRAINING_PROVIDER: str = "fal"  # fal, replicate
+    FAL_KEY: str = ""  # Fal.ai API Key
+    REPLICATE_USERNAME: str = ""  # Replicate 用户名（用于存储训练好的模型）
+    LORA_DEFAULT_STEPS: int = 1000  # 默认训练步数
+    LORA_DEFAULT_RANK: int = 16  # 默认 LoRA rank
+    LORA_DATASET_SIZE: int = 20  # 默认数据集大小
+
+    # ========== SFX (Sound Effects) Settings ==========
+    SFX_ENABLED: bool = True  # 是否启用 AI 拟音
+    SFX_PROVIDER: str = "audioldm"  # audioldm, elevenlabs
+    ELEVENLABS_API_KEY: str = ""  # ElevenLabs API Key
+    SFX_DEFAULT_VOLUME: float = 0.3  # 音效默认音量（相对于对白）
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

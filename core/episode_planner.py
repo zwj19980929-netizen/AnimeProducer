@@ -1,4 +1,4 @@
-"""集规划服务 - 智能规划动漫集数。"""
+"""集规划服务 - 基于视觉节拍智能规划动漫集数。"""
 
 import logging
 from typing import List, Optional
@@ -6,6 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 from core.chapter_analyzer import ChapterAnalysis
+from core.screenwriter import Screenwriter, MicroScript, ScreenwriterConfig
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +32,22 @@ class EpisodePlan(BaseModel):
 
 class EpisodePlannerConfig(BaseModel):
     """集规划配置。"""
-    target_duration_minutes: float = Field(default=24.0, description="每集目标时长（分钟）")
-    min_duration_minutes: float = Field(default=18.0, description="每集最短时长")
-    max_duration_minutes: float = Field(default=30.0, description="每集最长时长")
-    words_per_minute: float = Field(default=150.0, description="每分钟对应的小说字数")
-    style: str = Field(default="standard", description="风格: standard/movie/short")
+    target_duration_minutes: float = Field(default=2.5, description="每集目标时长（分钟）- 短剧模式")
+    min_duration_minutes: float = Field(default=1.5, description="每集最短时长")
+    max_duration_minutes: float = Field(default=5.0, description="每集最长时长")
+    beats_per_episode: int = Field(default=20, description="每集视觉节拍数")
+    words_per_minute: float = Field(default=150.0, description="每分钟对应的小说字数（回退用）")
+    style: str = Field(default="short", description="风格: standard/movie/short")
+    use_visual_beats: bool = Field(default=True, description="是否使用视觉节拍规划")
 
 
 class EpisodePlanner:
-    """集规划器 - 智能规划动漫集数。"""
+    """集规划器 - 基于视觉节拍智能规划动漫集数。"""
 
     def __init__(self):
         from integrations.llm_client import llm_client
         self.llm = llm_client
+        self.screenwriter = Screenwriter()
 
     def plan_episodes(
         self,
@@ -52,7 +56,9 @@ class EpisodePlanner:
         config: Optional[EpisodePlannerConfig] = None
     ) -> EpisodePlan:
         """
-        智能规划集数。
+        基于视觉节拍智能规划集数。
+
+        新逻辑：3000字 -> 提炼出 15 个有效视觉动作 -> 2.5分钟 = 1集
 
         Args:
             chapters: 章节列表，每个元素包含 chapter_number, title, content, word_count
@@ -70,6 +76,113 @@ class EpisodePlanner:
             from core.chapter_analyzer import chapter_analyzer
             chapter_analyses = chapter_analyzer.analyze_chapters_batch(chapters)
 
+        # 使用视觉节拍规划
+        if config.use_visual_beats:
+            return self._plan_with_visual_beats(chapters, chapter_analyses, config)
+
+        # 回退到传统字数规划
+        return self._plan_with_word_count(chapters, chapter_analyses, config)
+
+    def _plan_with_visual_beats(
+        self,
+        chapters: List[dict],
+        analyses: List[ChapterAnalysis],
+        config: EpisodePlannerConfig
+    ) -> EpisodePlan:
+        """基于视觉节拍进行集规划。"""
+        logger.info("Planning episodes based on visual beats...")
+
+        # 1. 对每个章节进行视觉节拍预压缩
+        chapter_beats: List[tuple] = []  # (chapter_info, micro_script, beat_count)
+
+        for ch in chapters:
+            content = ch.get("content", "")
+            if not content:
+                continue
+
+            # 调用 Screenwriter 进行预压缩
+            script = self.screenwriter.refactor_story(
+                content,
+                ScreenwriterConfig(target_duration_seconds=150.0)
+            )
+            beat_count = self.screenwriter.count_effective_beats(script)
+            chapter_beats.append((ch, script, beat_count))
+
+            logger.debug(
+                f"Chapter {ch.get('chapter_number', '?')}: "
+                f"{beat_count} effective beats, {script.total_duration:.1f}s"
+            )
+
+        # 2. 基于节拍数量规划集数
+        episodes = []
+        current_episode_start = 1
+        current_beats = 0
+        current_duration = 0.0
+        accumulated_chapters = []
+
+        for ch, script, beat_count in chapter_beats:
+            chapter_num = ch.get("chapter_number", len(accumulated_chapters) + 1)
+            accumulated_chapters.append((ch, script))
+            current_beats += beat_count
+            current_duration += script.total_duration
+
+            # 判断是否应该断开
+            should_break = False
+
+            # 条件1: 节拍数达到目标
+            if current_beats >= config.beats_per_episode:
+                should_break = True
+
+            # 条件2: 时长达到目标
+            target_seconds = config.target_duration_minutes * 60
+            if current_duration >= target_seconds:
+                should_break = True
+
+            # 条件3: 是最后一个章节
+            is_last = (ch == chapter_beats[-1][0])
+
+            if should_break or is_last:
+                episode_num = len(episodes) + 1
+                episodes.append(EpisodeSuggestion(
+                    episode_number=episode_num,
+                    title=f"第{episode_num}集",
+                    start_chapter=current_episode_start,
+                    end_chapter=chapter_num,
+                    synopsis=f"包含 {current_beats} 个视觉节拍",
+                    estimated_duration_minutes=current_duration / 60.0,
+                    key_events=[
+                        beat.action for _, script in accumulated_chapters
+                        for beat in script.visual_beats[:2]
+                    ][:5]
+                ))
+
+                logger.info(
+                    f"Episode {episode_num}: chapters {current_episode_start}-{chapter_num}, "
+                    f"{current_beats} beats, {current_duration/60:.1f} min"
+                )
+
+                # 重置
+                current_episode_start = chapter_num + 1
+                current_beats = 0
+                current_duration = 0.0
+                accumulated_chapters = []
+
+        total_duration = sum(ep.estimated_duration_minutes for ep in episodes)
+
+        return EpisodePlan(
+            episodes=episodes,
+            total_episodes=len(episodes),
+            total_estimated_duration=total_duration,
+            reasoning="基于视觉节拍数量规划（每集约20个有效视觉动作）"
+        )
+
+    def _plan_with_word_count(
+        self,
+        chapters: List[dict],
+        analyses: List[ChapterAnalysis],
+        config: EpisodePlannerConfig
+    ) -> EpisodePlan:
+        """基于字数进行集规划（回退方案）。"""
         # 计算总字数
         total_words = sum(ch.get("word_count", len(ch.get("content", ""))) for ch in chapters)
 
@@ -80,7 +193,7 @@ class EpisodePlanner:
         estimated_episodes = max(1, round(estimated_total_minutes / config.target_duration_minutes))
 
         logger.info(
-            f"Planning episodes: {len(chapters)} chapters, "
+            f"Planning episodes (word-based): {len(chapters)} chapters, "
             f"{total_words} words, ~{estimated_total_minutes:.1f} min, "
             f"~{estimated_episodes} episodes"
         )
@@ -88,7 +201,7 @@ class EpisodePlanner:
         # 使用 LLM 进行智能规划
         return self._plan_with_llm(
             chapters=chapters,
-            analyses=chapter_analyses,
+            analyses=analyses,
             config=config,
             estimated_episodes=estimated_episodes
         )

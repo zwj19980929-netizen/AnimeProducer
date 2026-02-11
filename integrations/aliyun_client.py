@@ -80,9 +80,19 @@ class AliyunWanxImageClient(BaseImageClient):
         prompt: str,
         reference_image_path: Optional[str] = None,
         style_preset: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
         **kwargs
     ) -> bytes:
-        """使用万相生成图像"""
+        """使用万相生成图像
+
+        Args:
+            prompt: 主提示词
+            reference_image_path: 参考图路径（可选）
+            style_preset: 风格预设（可选）
+            negative_prompt: 负面提示词，描述不想要的内容（可选）
+            seed: 随机种子，用于复现结果（可选）
+        """
         if not self.api_key:
             raise AuthenticationError("阿里云 DashScope API Key 未配置")
 
@@ -95,14 +105,25 @@ class AliyunWanxImageClient(BaseImageClient):
         original_proxies = _disable_proxy_for_china()
 
         try:
+            # 构建调用参数
+            call_params = {
+                "api_key": self.api_key,
+                "model": self.model,
+                "prompt": full_prompt,
+                "n": 1,
+                "size": "1024*1024"
+            }
+
+            # 添加负面提示词（如果支持）
+            if negative_prompt:
+                call_params["negative_prompt"] = negative_prompt
+
+            # 添加随机种子（如果支持）
+            if seed is not None:
+                call_params["seed"] = seed
+
             # 使用 SDK 调用
-            rsp = ImageSynthesis.call(
-                api_key=self.api_key,
-                model=self.model,
-                prompt=full_prompt,
-                n=1,
-                size="1024*1024"
-            )
+            rsp = ImageSynthesis.call(**call_params)
 
             if rsp.status_code == HTTPStatus.OK:
                 # 获取图片 URL 并下载

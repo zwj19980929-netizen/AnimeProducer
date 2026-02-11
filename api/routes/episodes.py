@@ -18,11 +18,12 @@ from api.schemas import (
     EpisodeSuggestion,
     EpisodeUpdate,
     ErrorResponse,
+    JobResponse,
     PipelineStartResponse,
     ShotListResponse,
     ShotResponse,
 )
-from core.models import Chapter, ChapterStatus, Episode, EpisodeStatus, Project, Shot
+from core.models import Chapter, ChapterStatus, Episode, EpisodeStatus, Job, JobStatus, JobType, Project, Shot
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,90 +42,128 @@ def _get_project_or_404(session: DBSession, project_id: str) -> Project:
 
 @router.post(
     "/plan",
-    response_model=EpisodePlanResponse,
+    response_model=JobResponse,
     responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
 )
 def plan_episodes(
     project_id: str,
     plan_request: EpisodePlanRequest,
     session: DBSession,
-) -> EpisodePlanResponse:
-    """AI 自动规划集数。"""
-    logger.info(f"Planning episodes for project: {project_id}")
+) -> JobResponse:
+    """AI 自动规划集数（异步任务）。
+
+    返回 Job ID，前端可通过 WebSocket 或轮询获取进度和结果。
+    """
+    logger.info(f"Starting async episode planning for project: {project_id}")
 
     _get_project_or_404(session, project_id)
 
-    # 获取所有章节
-    chapters = session.exec(
-        select(Chapter)
-        .where(Chapter.project_id == project_id)
-        .order_by(Chapter.chapter_number)
-    ).all()
+    # 检查是否有章节
+    chapter_count = session.exec(
+        select(func.count()).select_from(Chapter).where(Chapter.project_id == project_id)
+    ).one()
 
-    if not chapters:
+    if chapter_count == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No chapters found. Please upload chapters first.",
         )
 
-    # 准备章节数据
-    chapter_data = [
-        {
-            "chapter_number": ch.chapter_number,
-            "title": ch.title,
-            "content": ch.content,
-            "word_count": ch.word_count,
+    # 创建 Job 记录
+    job = Job(
+        project_id=project_id,
+        job_type=JobType.EPISODE_PLAN,
+        status=JobStatus.PENDING,
+        progress=0.0,
+        result={
+            "target_episode_duration": plan_request.target_episode_duration,
+            "max_episodes": plan_request.max_episodes,
+            "style": plan_request.style,
         }
-        for ch in chapters
-    ]
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
 
-    # 准备分析结果（如果有）
-    from core.chapter_analyzer import ChapterAnalysis
-    chapter_analyses = None
-    if all(ch.status == ChapterStatus.READY for ch in chapters):
-        chapter_analyses = [
-            ChapterAnalysis(
-                key_events=ch.key_events,
-                emotional_arc=ch.emotional_arc or "neutral",
-                importance_score=ch.importance_score,
-                characters_appeared=ch.characters_appeared,
-                is_good_break_point=False,
-            )
-            for ch in chapters
-        ]
-
-    # 调用规划服务
-    from core.episode_planner import EpisodePlanner, EpisodePlannerConfig
-    planner = EpisodePlanner()
-    config = EpisodePlannerConfig(
-        target_duration_minutes=plan_request.target_episode_duration,
+    # 派发 Celery 任务
+    from tasks.jobs import plan_episodes_job
+    plan_episodes_job.delay(
+        project_id=project_id,
+        job_id=job.id,
+        target_episode_duration=plan_request.target_episode_duration,
+        max_episodes=plan_request.max_episodes,
         style=plan_request.style,
     )
 
-    plan = planner.plan_episodes(
-        chapters=chapter_data,
-        chapter_analyses=chapter_analyses,
-        config=config,
-    )
+    logger.info(f"Episode planning job created: {job.id}")
+    return JobResponse.model_validate(job)
 
-    # 转换为响应格式
-    suggestions = [
-        EpisodeSuggestion(
-            episode_number=ep.episode_number,
-            title=ep.title,
-            start_chapter=ep.start_chapter,
-            end_chapter=ep.end_chapter,
-            synopsis=ep.synopsis,
-            estimated_duration_minutes=ep.estimated_duration_minutes,
+
+@router.get(
+    "/plan/{job_id}",
+    response_model=EpisodePlanResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def get_plan_result(
+    project_id: str,
+    job_id: str,
+    session: DBSession,
+) -> EpisodePlanResponse:
+    """获取集数规划结果。
+
+    当任务完成后，返回规划结果。
+    """
+    logger.debug(f"Getting plan result for job: {job_id}")
+
+    job = session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job not found: {job_id}",
         )
-        for ep in plan.episodes
-    ]
 
-    logger.info(f"Planned {len(suggestions)} episodes")
+    if job.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job not found in project: {project_id}",
+        )
+
+    if job.status == JobStatus.PENDING or job.status == JobStatus.STARTED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Job is still running",
+        )
+
+    if job.status == JobStatus.FAILURE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Job failed: {job.error_message}",
+        )
+
+    if job.status == JobStatus.REVOKED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Job was cancelled",
+        )
+
+    # 从 job.result 中提取规划结果
+    result = job.result or {}
+    suggested_episodes = result.get("suggested_episodes", [])
+
     return EpisodePlanResponse(
-        suggested_episodes=suggestions,
-        total_estimated_duration=plan.total_estimated_duration,
-        reasoning=plan.reasoning,
+        suggested_episodes=[
+            EpisodeSuggestion(
+                episode_number=ep["episode_number"],
+                title=ep["title"],
+                start_chapter=ep["start_chapter"],
+                end_chapter=ep["end_chapter"],
+                synopsis=ep["synopsis"],
+                estimated_duration_minutes=ep["estimated_duration_minutes"],
+            )
+            for ep in suggested_episodes
+        ],
+        total_estimated_duration=result.get("total_estimated_duration", 0),
+        reasoning=result.get("reasoning", ""),
     )
 
 

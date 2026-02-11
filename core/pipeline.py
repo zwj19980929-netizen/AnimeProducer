@@ -41,6 +41,10 @@ class KeyframeRequest:
     num_inference_steps: int = 30
     guidance_scale: float = 7.5
     negative_prompt: str = "low quality, bad anatomy, blurry"
+    # LoRA 支持
+    lora_url: Optional[str] = None  # LoRA 权重 URL
+    lora_scale: float = 0.8  # LoRA 权重强度 (0-1)
+    trigger_word: Optional[str] = None  # LoRA 触发词
 
 
 @dataclass
@@ -234,6 +238,7 @@ class KeyframeGenerator(PipelineComponent):
     使用图像生成模型创建关键帧，支持：
     - 注入参考图像以保持角色一致性
     - 自动将自然语言提示词转换为 Danbooru 风格标签
+    - LoRA 模型加载以增强角色一致性
     - 所有生成的图片强制上传到 OSS
     """
 
@@ -241,12 +246,14 @@ class KeyframeGenerator(PipelineComponent):
         self,
         image_generator: Optional[ImageGeneratorProtocol] = None,
         prompt_translator: Optional[PromptTranslator] = None,
-        enable_prompt_translation: bool = True
+        enable_prompt_translation: bool = True,
+        enable_lora: bool = True
     ):
         super().__init__("KeyframeGenerator")
         self._image_generator = image_generator
         self._prompt_translator = prompt_translator
         self._enable_prompt_translation = enable_prompt_translation
+        self._enable_lora = enable_lora
 
         if self._image_generator is None:
             from integrations.provider_factory import ProviderFactory
@@ -275,14 +282,31 @@ class KeyframeGenerator(PipelineComponent):
         if request.reference_image_path:
             self.logger.debug(f"Using reference image: {request.reference_image_path}")
 
+        if request.lora_url and self._enable_lora:
+            self.logger.info(f"Using LoRA: {request.lora_url} (scale={request.lora_scale})")
+
         # 构建提示词（可选择是否翻译为 Danbooru 风格）
         full_prompt, negative_prompt = self._build_prompt(request)
         self.logger.debug(f"Final prompt: {full_prompt[:200]}...")
 
-        image_data = self._image_generator.generate_image(
-            prompt=full_prompt,
-            reference_image_path=request.reference_image_path
-        )
+        # 调用图像生成器
+        # 如果支持 LoRA，传递 LoRA 参数
+        try:
+            if request.lora_url and self._enable_lora and hasattr(self._image_generator, 'generate_image_with_lora'):
+                image_data = self._image_generator.generate_image_with_lora(
+                    prompt=full_prompt,
+                    reference_image_path=request.reference_image_path,
+                    lora_url=request.lora_url,
+                    lora_scale=request.lora_scale
+                )
+            else:
+                image_data = self._image_generator.generate_image(
+                    prompt=full_prompt,
+                    reference_image_path=request.reference_image_path
+                )
+        except Exception as e:
+            self.logger.error(f"Image generation failed: {e}")
+            raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}: {e}")
 
         if not image_data:
             raise RuntimeError(f"Failed to generate keyframe for shot {request.shot_id}")
@@ -306,7 +330,10 @@ class KeyframeGenerator(PipelineComponent):
                 "original_prompt": request.prompt,
                 "reference_image": request.reference_image_path,
                 "style_preset": request.style_preset,
-                "prompt_translated": self._enable_prompt_translation
+                "prompt_translated": self._enable_prompt_translation,
+                "lora_url": request.lora_url,
+                "lora_scale": request.lora_scale,
+                "trigger_word": request.trigger_word
             }
         )
 
@@ -1122,6 +1149,26 @@ class ShotPipeline:
         effective_reference_image = reference_image_path
         effective_voice_id = voice_id
         character_tags: List[str] = []
+        # LoRA 支持
+        effective_lora_url: Optional[str] = None
+        effective_lora_scale: float = 0.8
+        effective_trigger_word: Optional[str] = None
+
+        # ========== LoRA 加载（独立于 character_registry）==========
+        # 即使没有 character_registry，也尝试加载 LoRA
+        if character_ids:
+            try:
+                from core.lora_manager import lora_manager
+                lora = lora_manager.get_character_lora(character_ids[0])
+                if lora and lora.lora_url:
+                    effective_lora_url = lora.lora_url
+                    effective_trigger_word = lora.trigger_word
+                    self.logger.info(f"Using LoRA for character: {effective_lora_url}")
+                    # 将触发词添加到提示词
+                    if effective_trigger_word:
+                        character_tags.append(effective_trigger_word)
+            except Exception as e:
+                self.logger.warning(f"Failed to load LoRA: {e}")
 
         if character_ids and self.character_registry:
             self.logger.info(f"Processing with characters: {character_ids}")
@@ -1145,7 +1192,8 @@ class ShotPipeline:
             positive_tags, negative_tags = self.character_registry.get_combined_tags_for_shot(
                 character_ids
             )
-            character_tags = positive_tags
+            # 合并标签，保留已有的触发词
+            character_tags = character_tags + [t for t in positive_tags if t not in character_tags]
 
         # ========== Step 1: 音频生成（如有对白）==========
         audio_path: Optional[str] = None
@@ -1203,7 +1251,10 @@ class ShotPipeline:
         keyframe_result = self._generate_keyframe_with_retry(
             shot_id=shot_id,
             prompt=enhanced_prompt,
-            reference_image_path=keyframe_reference
+            reference_image_path=keyframe_reference,
+            lora_url=effective_lora_url,
+            lora_scale=effective_lora_scale,
+            trigger_word=effective_trigger_word
         )
 
         # ========== Step 4: 视频生成 ==========
@@ -1447,14 +1498,17 @@ class ShotPipeline:
                     os.remove(temp_file)
                 except Exception:
                     pass
-    
+
     def _generate_keyframe_with_retry(
         self,
         shot_id: int,
         prompt: str,
-        reference_image_path: Optional[str] = None
+        reference_image_path: Optional[str] = None,
+        lora_url: Optional[str] = None,
+        lora_scale: float = 0.8,
+        trigger_word: Optional[str] = None
     ) -> KeyframeResult:
-        """生成关键帧，支持 VLM 评分重试"""
+        """生成关键帧，支持 VLM 评分重试和 LoRA"""
         # 确保至少执行一次生成
         max_retries = max(1, self.max_keyframe_retries)
         keyframe_result: Optional[KeyframeResult] = None
@@ -1463,7 +1517,10 @@ class ShotPipeline:
             keyframe_result = self.keyframe_generator.process(KeyframeRequest(
                 shot_id=shot_id,
                 prompt=prompt,
-                reference_image_path=reference_image_path
+                reference_image_path=reference_image_path,
+                lora_url=lora_url,
+                lora_scale=lora_scale,
+                trigger_word=trigger_word
             ))
             
             if not self.enable_vlm_scoring:

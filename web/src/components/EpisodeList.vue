@@ -12,7 +12,15 @@
           AI 规划集数
         </n-button>
         <n-button
-          v-if="hasEpisodes"
+          v-if="planLoading"
+          type="warning"
+          ghost
+          @click="handleCancelPlan"
+        >
+          取消规划
+        </n-button>
+        <n-button
+          v-if="hasEpisodes && !planLoading"
           type="error"
           ghost
           @click="handleDeleteAll"
@@ -24,6 +32,21 @@
         共 {{ episodes.length }} 集
       </div>
     </div>
+
+    <!-- 规划进度 -->
+    <n-card v-if="planLoading && planningJob" class="mb-4" title="AI 正在规划中...">
+      <div class="space-y-3">
+        <n-progress
+          type="line"
+          :percentage="(planningJob.progress || 0) * 100"
+          :show-indicator="true"
+          status="info"
+        />
+        <p class="text-gray-400 text-sm">
+          {{ getPlanningStatusText(planningJob) }}
+        </p>
+      </div>
+    </n-card>
 
     <!-- 规划结果预览 -->
     <n-card v-if="episodePlan" class="mb-4" title="AI 规划结果">
@@ -154,13 +177,13 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { NButton, NCard, NSpin, NTable, NModal, useMessage, useDialog } from 'naive-ui'
+import { NButton, NCard, NSpin, NTable, NModal, NProgress, useMessage, useDialog } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { useEpisodeStore } from '@/stores/episode'
 import EpisodeStatusBadge from './EpisodeStatusBadge.vue'
 import ShotList from './ShotList.vue'
 import VideoPlayer from './VideoPlayer.vue'
-import type { Episode, EpisodePlanResponse } from '@/types/api'
+import type { Episode, EpisodePlanResponse, Job } from '@/types/api'
 
 const props = defineProps<{
   projectId: string
@@ -170,7 +193,7 @@ const props = defineProps<{
 const message = useMessage()
 const dialog = useDialog()
 const episodeStore = useEpisodeStore()
-const { episodes, loading, error } = storeToRefs(episodeStore)
+const { episodes, loading, error, planningJob } = storeToRefs(episodeStore)
 
 const planLoading = ref(false)
 const actionLoading = ref<string | null>(null)
@@ -202,6 +225,23 @@ async function handlePlanEpisodes() {
     }
   } finally {
     planLoading.value = false
+  }
+}
+
+function handleCancelPlan() {
+  episodeStore.cancelPlanning()
+  planLoading.value = false
+  message.info('已取消规划')
+}
+
+function getPlanningStatusText(job: Job): string {
+  const progress = (job.progress || 0) * 100
+  if (progress < 30) {
+    return '正在加载章节数据...'
+  } else if (progress < 80) {
+    return '正在调用 AI 分析章节并规划集数...'
+  } else {
+    return '正在整理规划结果...'
   }
 }
 

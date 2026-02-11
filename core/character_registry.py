@@ -28,6 +28,7 @@ class CharacterAsset:
     lora_path: Optional[str] = None                      # 角色 LoRA 权重路径
     face_embedding: Optional[Any] = None                 # 人脸特征向量 (用于一致性验证)
     metadata: Dict[str, Any] = field(default_factory=dict)     # 其他元数据
+    aliases: List[str] = field(default_factory=list)     # 角色别名列表（用于消歧）
 
     def get_primary_reference(self) -> Optional[str]:
         """获取主参考图"""
@@ -107,17 +108,23 @@ class CharacterRegistry:
 
     def get_by_name(self, name: str) -> Optional[CharacterAsset]:
         """
-        根据名称获取角色资产
+        根据名称获取角色资产（支持别名匹配）
 
         Args:
-            name: 角色名称
+            name: 角色名称或别名
 
         Returns:
             角色资产，如果不存在则返回 None
         """
+        name_lower = name.lower()
         for asset in self._characters.values():
-            if asset.name.lower() == name.lower():
+            # 匹配主名称
+            if asset.name.lower() == name_lower:
                 return asset
+            # 匹配别名列表
+            for alias in asset.aliases:
+                if alias.lower() == name_lower:
+                    return asset
         return None
 
     def list_characters(self) -> List[CharacterAsset]:
@@ -268,7 +275,8 @@ class CharacterRegistry:
                     negative_tags=config.get("negative_tags", []),
                     voice_id=config.get("voice_id"),
                     lora_path=config.get("lora_path"),
-                    metadata=config.get("metadata", {})
+                    metadata=config.get("metadata", {}),
+                    aliases=config.get("aliases", [])
                 )
 
                 self.register(asset)
@@ -310,7 +318,8 @@ class CharacterRegistry:
             "negative_tags": asset.negative_tags,
             "voice_id": asset.voice_id,
             "lora_path": asset.lora_path,
-            "metadata": asset.metadata
+            "metadata": asset.metadata,
+            "aliases": asset.aliases
         }
 
         config_path = os.path.join(char_dir, "config.json")

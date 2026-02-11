@@ -55,13 +55,13 @@
               <span class="text-gray-400">重要性:</span>
               <n-progress
                 type="line"
-                :percentage="chapter.importance_score * 100"
+                :percentage="(chapter.importance_score ?? 0.5) * 100"
                 :show-indicator="false"
                 :height="8"
                 style="width: 100px"
-                :color="getImportanceColor(chapter.importance_score)"
+                :color="getImportanceColor(chapter.importance_score ?? 0.5)"
               />
-              <span class="text-white text-sm">{{ (chapter.importance_score * 100).toFixed(0) }}%</span>
+              <span class="text-white text-sm">{{ ((chapter.importance_score ?? 0.5) * 100).toFixed(0) }}%</span>
             </div>
             <div v-if="chapter.suggested_episode" class="flex items-center gap-2">
               <span class="text-gray-400">建议归属:</span>
@@ -140,6 +140,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:show': [value: boolean]
+  'analyzed': []
 }>()
 
 const message = useMessage()
@@ -186,6 +187,8 @@ async function handleAnalyze() {
     // 分析完成后重新加载完整的章节数据
     chapter.value = await apiClient.getChapter(props.projectId, props.chapterNumber)
     message.success('章节分析完成')
+    // 通知父组件刷新列表
+    emit('analyzed')
   } catch (error) {
     message.error(`分析失败: ${(error as Error).message}`)
   } finally {
