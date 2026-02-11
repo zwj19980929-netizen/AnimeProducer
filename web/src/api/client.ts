@@ -10,6 +10,12 @@ import type {
   CharacterCreate,
   CharacterUpdate,
   CharacterListResponse,
+  CharacterImage,
+  CharacterImageListResponse,
+  GenerateVariantRequest,
+  BatchGenerateVariantRequest,
+  SetAnchorImageRequest,
+  MarkTrainingImagesRequest,
   ShotListResponse,
   Job,
   JobCreate,
@@ -41,7 +47,16 @@ import type {
   VoiceConfig,
   VoicePreviewRequest,
   VoicePreviewResponse,
-  AvailableVoicesResponse
+  AvailableVoicesResponse,
+  LoRAStartTrainingRequest,
+  CharacterLoRA,
+  LoRATrainingStatusResponse,
+  LoRAListResponse,
+  ProviderStatusResponse,
+  LoginRequest,
+  RegisterRequest,
+  Token,
+  User
 } from '@/types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -192,6 +207,82 @@ class ApiClient {
     return response.data
   }
 
+  // Character Extraction from Chapters
+  async extractCharactersFromChapters(
+    projectId: string,
+    chapterNumbers: number[],
+    autoCreate: boolean = true
+  ): Promise<{
+    project_id: string
+    chapters_scanned: number[]
+    new_characters: any[]
+    character_evolutions: any[]
+    alias_detections: any[]
+    suspected_identities: any[]
+    characters_created: any[]
+  }> {
+    const response = await this.client.post(
+      `/projects/${projectId}/chapters/extract-characters`,
+      {},
+      {
+        params: { chapter_numbers: chapterNumbers, auto_create: autoCreate },
+        paramsSerializer: params => {
+          const searchParams = new URLSearchParams()
+          for (const key in params) {
+            if (Array.isArray(params[key])) {
+              params[key].forEach((val: any) => searchParams.append(key, val))
+            } else {
+              searchParams.append(key, params[key])
+            }
+          }
+          return searchParams.toString()
+        },
+        timeout: this.longTimeout
+      }
+    )
+    return response.data
+  }
+
+  async mergeCharacters(
+    projectId: string,
+    primaryCharacterId: string,
+    secondaryCharacterId: string
+  ): Promise<{
+    success: boolean
+    merged_character: { character_id: string; name: string; aliases: string[] }
+    message: string
+  }> {
+    const response = await this.client.post(
+      `/projects/${projectId}/chapters/merge-characters`,
+      {},
+      {
+        params: {
+          primary_character_id: primaryCharacterId,
+          secondary_character_id: secondaryCharacterId
+        }
+      }
+    )
+    return response.data
+  }
+
+  async addCharacterAlias(
+    projectId: string,
+    characterId: string,
+    alias: string
+  ): Promise<{
+    success: boolean
+    character_id: string
+    name: string
+    aliases: string[]
+  }> {
+    const response = await this.client.post(
+      `/projects/${projectId}/chapters/add-character-alias`,
+      {},
+      { params: { character_id: characterId, alias } }
+    )
+    return response.data
+  }
+
   // Book
   async getBook(projectId: string): Promise<Book> {
     const response = await this.client.get<Book>(`/projects/${projectId}/book`)
@@ -228,11 +319,17 @@ class ApiClient {
   }
 
   // Episodes
-  async planEpisodes(projectId: string, data?: EpisodePlanRequest): Promise<EpisodePlanResponse> {
-    const response = await this.client.post<EpisodePlanResponse>(
+  async planEpisodes(projectId: string, data?: EpisodePlanRequest): Promise<Job> {
+    const response = await this.client.post<Job>(
       `/projects/${projectId}/episodes/plan`,
-      data || {},
-      { timeout: this.longTimeout }
+      data || {}
+    )
+    return response.data
+  }
+
+  async getPlanResult(projectId: string, jobId: string): Promise<EpisodePlanResponse> {
+    const response = await this.client.get<EpisodePlanResponse>(
+      `/projects/${projectId}/episodes/plan/${jobId}`
     )
     return response.data
   }
@@ -338,13 +435,92 @@ class ApiClient {
     options?: {
       custom_prompt?: string
       style_preset?: string
+      negative_prompt?: string
+      seed?: number
       num_candidates?: number
     }
-  ): Promise<Character> {
-    const response = await this.client.post<Character>(
+  ): Promise<CharacterImageListResponse> {
+    const response = await this.client.post<CharacterImageListResponse>(
       `/assets/characters/${characterId}/generate-reference`,
       options || {},
       { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  // Character Image Gallery
+  async listCharacterImages(
+    characterId: string,
+    options?: {
+      image_type?: string
+      training_only?: boolean
+    }
+  ): Promise<CharacterImageListResponse> {
+    const response = await this.client.get<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/images`,
+      { params: options }
+    )
+    return response.data
+  }
+
+  async getCharacterImage(characterId: string, imageId: string): Promise<CharacterImage> {
+    const response = await this.client.get<CharacterImage>(
+      `/assets/characters/${characterId}/images/${imageId}`
+    )
+    return response.data
+  }
+
+  async deleteCharacterImage(characterId: string, imageId: string): Promise<void> {
+    await this.client.delete(`/assets/characters/${characterId}/images/${imageId}`)
+  }
+
+  async setAnchorImage(characterId: string, imageId: string): Promise<Character> {
+    const response = await this.client.post<Character>(
+      `/assets/characters/${characterId}/images/set-anchor`,
+      { image_id: imageId }
+    )
+    return response.data
+  }
+
+  async markTrainingImages(
+    characterId: string,
+    imageIds: string[],
+    selected: boolean = true
+  ): Promise<CharacterImageListResponse> {
+    const response = await this.client.post<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/images/mark-training`,
+      { image_ids: imageIds, selected }
+    )
+    return response.data
+  }
+
+  async generateCharacterVariants(
+    characterId: string,
+    options: GenerateVariantRequest
+  ): Promise<CharacterImageListResponse> {
+    const response = await this.client.post<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/images/generate-variants`,
+      options,
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async batchGenerateCharacterVariants(
+    characterId: string,
+    options: BatchGenerateVariantRequest
+  ): Promise<CharacterImageListResponse> {
+    const response = await this.client.post<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/images/batch-generate-variants`,
+      options,
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async getTrainingImages(characterId: string): Promise<CharacterImageListResponse> {
+    const response = await this.client.get<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/training-images`
     )
     return response.data
   }
@@ -368,6 +544,22 @@ class ApiClient {
     const response = await this.client.post<Character>(
       `/assets/characters/${characterId}/voice`,
       voiceConfig
+    )
+    return response.data
+  }
+
+  async uploadCharacterToOSS(characterId: string): Promise<Character> {
+    const response = await this.client.post<Character>(
+      `/assets/characters/${characterId}/upload-to-oss`
+    )
+    return response.data
+  }
+
+  async batchUploadCharactersToOSS(projectId?: string): Promise<CharacterListResponse> {
+    const response = await this.client.post<CharacterListResponse>(
+      '/assets/characters/batch-upload-to-oss',
+      {},
+      { params: projectId ? { project_id: projectId } : undefined }
     )
     return response.data
   }
@@ -449,6 +641,77 @@ class ApiClient {
       { timeout: 300000 }
     )
     return response.data
+  }
+
+  // LoRA Training
+  async startLoRATraining(data: LoRAStartTrainingRequest): Promise<CharacterLoRA> {
+    const response = await this.client.post<CharacterLoRA>(
+      '/lora/train',
+      data,
+      { timeout: this.longTimeout }
+    )
+    return response.data
+  }
+
+  async getLoRA(loraId: string): Promise<CharacterLoRA> {
+    const response = await this.client.get<CharacterLoRA>(`/lora/${loraId}`)
+    return response.data
+  }
+
+  async getLoRAStatus(loraId: string): Promise<LoRATrainingStatusResponse> {
+    const response = await this.client.get<LoRATrainingStatusResponse>(`/lora/${loraId}/status`)
+    return response.data
+  }
+
+  async listCharacterLoRAs(characterId: string): Promise<CharacterLoRA[]> {
+    const response = await this.client.get<CharacterLoRA[]>(`/lora/character/${characterId}`)
+    return response.data
+  }
+
+  async getActiveLoRA(characterId: string): Promise<CharacterLoRA | null> {
+    const response = await this.client.get<CharacterLoRA | null>(`/lora/character/${characterId}/active`)
+    return response.data
+  }
+
+  async cancelLoRATraining(loraId: string): Promise<{ success: boolean; message: string }> {
+    const response = await this.client.post<{ success: boolean; message: string }>(`/lora/${loraId}/cancel`)
+    return response.data
+  }
+
+  // Provider Health Status
+  async getProviderStatus(): Promise<ProviderStatusResponse> {
+    const response = await this.client.get<ProviderStatusResponse>('/api-test/provider-status')
+    return response.data
+  }
+
+  // Authentication
+  async login(data: LoginRequest): Promise<Token> {
+    const response = await this.client.post<Token>('/auth/login', data)
+    return response.data
+  }
+
+  async register(data: RegisterRequest): Promise<Token> {
+    const response = await this.client.post<Token>('/auth/register', data)
+    return response.data
+  }
+
+  async getCurrentUser(): Promise<User> {
+    const response = await this.client.get<User>('/auth/me')
+    return response.data
+  }
+
+  async refreshToken(): Promise<Token> {
+    const response = await this.client.post<Token>('/auth/refresh')
+    return response.data
+  }
+
+  // Set auth token for subsequent requests
+  setAuthToken(token: string | null): void {
+    if (token) {
+      this.client.defaults.headers.common['Authorization'] = `Bearer ${token}`
+    } else {
+      delete this.client.defaults.headers.common['Authorization']
+    }
   }
 }
 

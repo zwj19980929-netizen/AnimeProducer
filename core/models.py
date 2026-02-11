@@ -40,6 +40,7 @@ class JobType(str, Enum):
     SHOT_RENDER = "SHOT_RENDER"
     VIDEO_COMPOSITION = "VIDEO_COMPOSITION"
     FULL_PIPELINE = "FULL_PIPELINE"
+    EPISODE_PLAN = "EPISODE_PLAN"
 
 
 class ShotRenderStatus(str, Enum):
@@ -166,12 +167,68 @@ class Character(SQLModel, table=True):
     project_id: str | None = Field(default=None, foreign_key="projects.id", index=True)
 
     name: str
-    prompt_base: str
-    reference_image_path: str
+    aliases: list[str] = Field(default_factory=list, sa_column=Column(JSON))  # 角色别名列表
+    appearance_prompt: str = Field(default="")  # 角色外貌描述，用于生成图片
+    bio: str = Field(default="")  # 角色简介/背景故事
+    prompt_base: str = Field(default="")  # 保留兼容，可用于额外的生成提示
+    first_appearance_chapter: int = Field(default=0)  # 首次出场章节
+
+    # 参考图（候选图中选择的）
+    reference_image_path: str = Field(default="")
     reference_image_url: str | None = None  # OSS URL
+
+    # 锚定图（确定形象后的底稿，所有后续生成都基于此）
+    anchor_image_id: str | None = Field(default=None, foreign_key="character_images.id")
+    anchor_image_path: str | None = None
+    anchor_image_url: str | None = None
+
     voice_id: str | None = None
 
     character_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class CharacterImageType(str, Enum):
+    """角色图片类型。"""
+    CANDIDATE = "CANDIDATE"      # 候选图（初次生成的参考图）
+    ANCHOR = "ANCHOR"            # 锚定图（确定的角色形象底稿）
+    VARIANT = "VARIANT"          # 变体图（基于锚定图生成的不同姿态/表情）
+    TRAINING = "TRAINING"        # 训练图（标记用于 LoRA 训练）
+    CUSTOM = "CUSTOM"            # 自定义生成图
+
+
+class CharacterImage(SQLModel, table=True):
+    """角色图片库，存储角色的所有生成图片。"""
+    __tablename__ = "character_images"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    character_id: str = Field(foreign_key="characters.character_id", index=True)
+
+    # 图片类型
+    image_type: CharacterImageType = Field(default=CharacterImageType.CANDIDATE)
+
+    # 图片路径
+    image_path: str  # 本地路径
+    image_url: str | None = None  # OSS URL
+    thumbnail_path: str | None = None  # 缩略图路径
+    thumbnail_url: str | None = None  # 缩略图 OSS URL
+
+    # 生成参数
+    prompt: str = Field(default="")  # 生成时使用的完整 prompt
+    pose: str | None = None  # 姿态描述
+    expression: str | None = None  # 表情描述
+    angle: str | None = None  # 角度描述
+    style_preset: str | None = None  # 风格预设
+
+    # 标记
+    is_selected_for_training: bool = Field(default=False)  # 是否选中用于训练
+    is_anchor: bool = Field(default=False)  # 是否为锚定图
+    quality_score: float | None = None  # 质量评分（可选）
+
+    # 元数据
+    generation_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -227,6 +284,13 @@ class Shot(SQLModel, table=True):
     emotion_context: str | None = Field(
         default=None,
         description="情感上下文描述，用于更精确的情感表达"
+    )
+
+    # 音效相关字段
+    sfx_tags: list[str] = Field(
+        default_factory=list,
+        sa_column=Column(JSON),
+        description="音效标签列表，如 ['rain', 'thunder', 'footsteps']"
     )
 
     sequence_order: int = Field(default=0)
@@ -326,6 +390,60 @@ class Episode(SQLModel, table=True):
 
     # 元数据
     episode_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+# ============================================================================
+# LoRA Training Tables
+# ============================================================================
+
+
+class LoRATrainingStatus(str, Enum):
+    """LoRA 训练状态。"""
+    PENDING = "PENDING"              # 等待训练
+    GENERATING_DATASET = "GENERATING_DATASET"  # 生成数据集中
+    DATASET_READY = "DATASET_READY"  # 数据集就绪
+    UPLOADING = "UPLOADING"          # 上传数据集中
+    TRAINING = "TRAINING"            # 训练中
+    READY = "READY"                  # 训练完成，可用
+    FAILED = "FAILED"                # 训练失败
+
+
+class CharacterLoRA(SQLModel, table=True):
+    """角色 LoRA 模型，用于保持角色一致性。"""
+    __tablename__ = "character_loras"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    character_id: str = Field(foreign_key="characters.character_id", index=True)
+
+    # 训练配置
+    base_model: str = Field(default="flux")  # flux, sdxl, sd15
+    trigger_word: str  # 触发词，如 "ohwx_character_name"
+    training_provider: str = Field(default="fal")  # fal, replicate
+
+    # 训练状态
+    status: LoRATrainingStatus = Field(default=LoRATrainingStatus.PENDING)
+    progress: float = Field(default=0.0)  # 0.0 - 1.0
+
+    # 数据集信息
+    dataset_size: int = Field(default=0)  # 训练图片数量
+    dataset_url: str | None = None  # 数据集 ZIP 的 OSS URL
+
+    # 训练结果
+    lora_url: str | None = None  # 训练完成的 LoRA 权重 URL
+    lora_local_path: str | None = None  # 本地缓存路径
+    training_job_id: str | None = None  # 云端训练任务 ID
+
+    # 训练参数
+    training_steps: int = Field(default=1000)
+    learning_rate: float = Field(default=1e-4)
+    lora_rank: int = Field(default=16)
+
+    # 元数据
+    training_metadata: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    error_message: str | None = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

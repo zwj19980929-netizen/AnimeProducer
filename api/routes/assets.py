@@ -17,12 +17,18 @@ from api.schemas import (
     CharacterUpdate,
     ErrorResponse,
     GenerateReferenceRequest,
+    GenerateVariantRequest,
+    BatchGenerateVariantRequest,
+    CharacterImageResponse,
+    CharacterImageListResponse,
+    SetAnchorImageRequest,
+    MarkTrainingImagesRequest,
     VoiceConfig,
     VoicePreviewRequest,
     VoicePreviewResponse,
     AvailableVoicesResponse,
 )
-from core.models import Character, Project
+from core.models import Character, CharacterImage, CharacterImageType, Project
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -61,6 +67,8 @@ def create_character(
         character_id=character_in.character_id,
         project_id=project_id,
         name=character_in.name,
+        appearance_prompt=character_in.appearance_prompt,
+        bio=character_in.bio,
         prompt_base=character_in.prompt_base,
         reference_image_path=character_in.reference_image_path,
         voice_id=character_in.voice_id,
@@ -185,7 +193,7 @@ def delete_character(
 
 @router.post(
     "/characters/{character_id}/generate-reference",
-    response_model=CharacterResponse,
+    response_model=CharacterImageListResponse,
     responses={404: {"model": ErrorResponse}},
 )
 def generate_character_reference(
@@ -193,11 +201,11 @@ def generate_character_reference(
     session: DBSession,
     asset_service: AssetDep,
     request: GenerateReferenceRequest = None,
-) -> CharacterResponse:
-    """Generate reference image for a character using AI.
+) -> CharacterImageListResponse:
+    """Generate reference images for a character using AI.
 
-    This endpoint triggers the asset generation pipeline for the character.
-    You can provide a custom prompt to customize the generated image.
+    使用角色的 appearance_prompt 生成候选参考图，存入图片库。
+    用户可以从中选择一张作为锚定图。
 
     Args:
         character_id: The character ID
@@ -219,16 +227,15 @@ def generate_character_reference(
     custom_prompt = request.custom_prompt
     style_preset = request.style_preset or "anime style"
     num_candidates = request.num_candidates
+    negative_prompt = request.negative_prompt
+    seed = request.seed
 
-    # 构建完整的 prompt
+    # 构建完整的 prompt（使用 appearance_prompt）
+    base_prompt = character.appearance_prompt or character.prompt_base or character.name
     if custom_prompt:
-        # 如果有自定义 prompt，追加到 prompt_base 后面
-        full_prompt_base = f"{character.prompt_base}, {custom_prompt}"
-        # 更新角色的 prompt_base
-        character.prompt_base = full_prompt_base
-        session.add(character)
-        session.commit()
-        session.refresh(character)
+        full_prompt = f"{base_prompt}, {custom_prompt}"
+    else:
+        full_prompt = base_prompt
 
     try:
         # 生成参考图候选
@@ -237,7 +244,10 @@ def generate_character_reference(
             style_spec=style_preset,
             n=num_candidates,
             project_id=character.project_id,
-            style_preset=style_preset
+            style_preset=style_preset,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            prompt_override=full_prompt  # 使用完整 prompt
         )
 
         if not candidates:
@@ -246,28 +256,37 @@ def generate_character_reference(
                 detail="Failed to generate reference images",
             )
 
-        # 选择最佳参考图（目前简单选第一个，后续可以加入评分逻辑）
-        best_path = asset_service.manager.select_best_reference(
-            candidates=candidates,
-            character=character,
-            session=session
-        )
+        # 将候选图存入图片库
+        created_images = []
+        for candidate in candidates:
+            image = CharacterImage(
+                character_id=character_id,
+                image_type=CharacterImageType.CANDIDATE,
+                image_path=candidate.local_path,
+                image_url=candidate.oss_url,
+                prompt=full_prompt,
+                style_preset=style_preset,
+                generation_metadata={
+                    "style_spec": style_preset,
+                    "custom_prompt": custom_prompt,
+                    "negative_prompt": negative_prompt,
+                    "seed": candidate.seed,
+                }
+            )
+            session.add(image)
+            created_images.append(image)
 
-        logger.info(f"Generated reference image for {character_id}: {best_path}")
+        session.commit()
 
-        # 刷新角色数据
-        session.refresh(character)
+        # 刷新获取 ID
+        for img in created_images:
+            session.refresh(img)
 
-        return CharacterResponse(
-            character_id=character.character_id,
-            project_id=character.project_id,
-            name=character.name,
-            prompt_base=character.prompt_base,
-            reference_image_path=character.reference_image_path,
-            reference_image_url=character.reference_image_url,
-            voice_id=character.voice_id,
-            character_metadata=character.character_metadata,
-            created_at=character.created_at,
+        logger.info(f"Generated {len(created_images)} reference images for {character_id}")
+
+        return CharacterImageListResponse(
+            items=[CharacterImageResponse.model_validate(img) for img in created_images],
+            total=len(created_images),
         )
 
     except Exception as e:
@@ -568,3 +587,461 @@ def set_character_voice(
 
     logger.info(f"Voice set for character {character_id}")
     return CharacterResponse.model_validate(character)
+
+
+# ============================================================================
+# 角色图片库 API
+# ============================================================================
+
+@router.get(
+    "/characters/{character_id}/images",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def list_character_images(
+    character_id: str,
+    session: DBSession,
+    image_type: CharacterImageType | None = Query(default=None, description="按类型筛选"),
+    training_only: bool = Query(default=False, description="只显示标记为训练的图片"),
+) -> CharacterImageListResponse:
+    """获取角色的图片库列表"""
+    logger.debug(f"Listing images for character: {character_id}")
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    query = select(CharacterImage).where(CharacterImage.character_id == character_id)
+
+    if image_type:
+        query = query.where(CharacterImage.image_type == image_type)
+
+    if training_only:
+        query = query.where(CharacterImage.is_selected_for_training == True)
+
+    query = query.order_by(CharacterImage.created_at.desc())
+    images = session.exec(query).all()
+
+    return CharacterImageListResponse(
+        items=[CharacterImageResponse.model_validate(img) for img in images],
+        total=len(images),
+    )
+
+
+@router.get(
+    "/characters/{character_id}/images/{image_id}",
+    response_model=CharacterImageResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def get_character_image(
+    character_id: str,
+    image_id: str,
+    session: DBSession,
+) -> CharacterImageResponse:
+    """获取单张角色图片详情"""
+    image = session.get(CharacterImage, image_id)
+    if not image or image.character_id != character_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image not found: {image_id}",
+        )
+
+    return CharacterImageResponse.model_validate(image)
+
+
+@router.delete(
+    "/characters/{character_id}/images/{image_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={404: {"model": ErrorResponse}},
+)
+def delete_character_image(
+    character_id: str,
+    image_id: str,
+    session: DBSession,
+) -> None:
+    """删除角色图片"""
+    import os
+
+    image = session.get(CharacterImage, image_id)
+    if not image or image.character_id != character_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image not found: {image_id}",
+        )
+
+    # 检查是否为锚定图
+    character = session.get(Character, character_id)
+    if character and character.anchor_image_id == image_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete anchor image. Please set another image as anchor first.",
+        )
+
+    # 删除本地文件
+    if image.image_path and os.path.exists(image.image_path):
+        try:
+            os.remove(image.image_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete local file: {e}")
+
+    session.delete(image)
+    session.commit()
+
+    logger.info(f"Deleted image {image_id} for character {character_id}")
+
+
+@router.post(
+    "/characters/{character_id}/images/set-anchor",
+    response_model=CharacterResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def set_anchor_image(
+    character_id: str,
+    request: SetAnchorImageRequest,
+    session: DBSession,
+) -> CharacterResponse:
+    """设置锚定图（确定角色形象）
+
+    设置后，所有后续生成的图片都会基于这张锚定图。
+    """
+    logger.info(f"Setting anchor image for character {character_id}: {request.image_id}")
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    image = session.get(CharacterImage, request.image_id)
+    if not image or image.character_id != character_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Image not found: {request.image_id}",
+        )
+
+    # 取消之前的锚定图标记
+    if character.anchor_image_id:
+        old_anchor = session.get(CharacterImage, character.anchor_image_id)
+        if old_anchor:
+            old_anchor.is_anchor = False
+            old_anchor.image_type = CharacterImageType.CANDIDATE
+            session.add(old_anchor)
+
+    # 设置新的锚定图
+    image.is_anchor = True
+    image.image_type = CharacterImageType.ANCHOR
+    session.add(image)
+
+    # 更新角色
+    character.anchor_image_id = image.id
+    character.anchor_image_path = image.image_path
+    character.anchor_image_url = image.image_url
+    # 同时更新参考图（兼容旧逻辑）
+    character.reference_image_path = image.image_path
+    character.reference_image_url = image.image_url
+    character.updated_at = datetime.utcnow()
+    session.add(character)
+
+    session.commit()
+    session.refresh(character)
+
+    logger.info(f"Anchor image set for character {character_id}")
+    return CharacterResponse.model_validate(character)
+
+
+@router.post(
+    "/characters/{character_id}/images/mark-training",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def mark_training_images(
+    character_id: str,
+    request: MarkTrainingImagesRequest,
+    session: DBSession,
+) -> CharacterImageListResponse:
+    """标记/取消标记图片用于 LoRA 训练"""
+    logger.info(f"Marking training images for character {character_id}: {request.image_ids}")
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    updated_images = []
+    for image_id in request.image_ids:
+        image = session.get(CharacterImage, image_id)
+        if image and image.character_id == character_id:
+            image.is_selected_for_training = request.selected
+            if request.selected:
+                image.image_type = CharacterImageType.TRAINING
+            elif image.image_type == CharacterImageType.TRAINING:
+                # 取消训练标记时，恢复为变体图或候选图
+                image.image_type = CharacterImageType.VARIANT if image.pose or image.expression else CharacterImageType.CANDIDATE
+            session.add(image)
+            updated_images.append(image)
+
+    session.commit()
+
+    for img in updated_images:
+        session.refresh(img)
+
+    return CharacterImageListResponse(
+        items=[CharacterImageResponse.model_validate(img) for img in updated_images],
+        total=len(updated_images),
+    )
+
+
+@router.post(
+    "/characters/{character_id}/images/generate-variants",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def generate_character_variants(
+    character_id: str,
+    request: GenerateVariantRequest,
+    session: DBSession,
+    asset_service: AssetDep,
+) -> CharacterImageListResponse:
+    """基于锚定图生成变体图片（不同姿态/表情/角度）
+
+    必须先设置锚定图才能生成变体。
+    """
+    logger.info(f"Generating variants for character {character_id}")
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    # 检查是否有锚定图
+    if not character.anchor_image_path and not character.anchor_image_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please set an anchor image first before generating variants.",
+        )
+
+    # 构建变体 prompt
+    base_prompt = character.appearance_prompt or character.prompt_base or character.name
+    variant_parts = []
+
+    if request.pose:
+        variant_parts.append(request.pose)
+    if request.expression:
+        variant_parts.append(request.expression)
+    if request.angle:
+        variant_parts.append(request.angle)
+    if request.custom_prompt:
+        variant_parts.append(request.custom_prompt)
+
+    variant_desc = ", ".join(variant_parts) if variant_parts else "portrait"
+    full_prompt = f"{base_prompt}, {variant_desc}"
+
+    style_preset = request.style_preset or "anime style"
+    negative_prompt = request.negative_prompt
+    seed = request.seed
+
+    try:
+        # 使用锚定图作为参考进行 I2I 生成
+        candidates = asset_service.manager.generate_reference_images(
+            character=character,
+            style_spec=style_preset,
+            n=request.num_images,
+            project_id=character.project_id,
+            style_preset=style_preset,
+            negative_prompt=negative_prompt,
+            seed=seed,
+            prompt_override=full_prompt,
+            reference_image=character.anchor_image_path or character.anchor_image_url,
+        )
+
+        if not candidates:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate variant images",
+            )
+
+        # 存入图片库
+        created_images = []
+        for candidate in candidates:
+            image = CharacterImage(
+                character_id=character_id,
+                image_type=CharacterImageType.VARIANT,
+                image_path=candidate.local_path,
+                image_url=candidate.oss_url,
+                prompt=full_prompt,
+                pose=request.pose,
+                expression=request.expression,
+                angle=request.angle,
+                style_preset=style_preset,
+                generation_metadata={
+                    "custom_prompt": request.custom_prompt,
+                    "anchor_image": character.anchor_image_path,
+                    "negative_prompt": negative_prompt,
+                    "seed": candidate.seed,
+                }
+            )
+            session.add(image)
+            created_images.append(image)
+
+        session.commit()
+
+        for img in created_images:
+            session.refresh(img)
+
+        logger.info(f"Generated {len(created_images)} variant images for {character_id}")
+
+        return CharacterImageListResponse(
+            items=[CharacterImageResponse.model_validate(img) for img in created_images],
+            total=len(created_images),
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to generate variants for {character_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate variant images: {str(e)}",
+        )
+
+
+@router.post(
+    "/characters/{character_id}/images/batch-generate-variants",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def batch_generate_character_variants(
+    character_id: str,
+    request: BatchGenerateVariantRequest,
+    session: DBSession,
+    asset_service: AssetDep,
+) -> CharacterImageListResponse:
+    """批量生成多种变体图片
+
+    一次性生成多种姿态/表情/角度的组合。
+    """
+    logger.info(f"Batch generating variants for character {character_id}")
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    if not character.anchor_image_path and not character.anchor_image_url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please set an anchor image first before generating variants.",
+        )
+
+    # 如果没有指定变体，使用默认的姿态/表情组合
+    variants = request.variants
+    if not variants:
+        variants = [
+            {"pose": "standing", "expression": "neutral", "angle": "front view"},
+            {"pose": "standing", "expression": "smiling", "angle": "three-quarter view"},
+            {"pose": "sitting", "expression": "serious", "angle": "side view"},
+            {"pose": "walking", "expression": "happy", "angle": "front view"},
+        ]
+
+    base_prompt = character.appearance_prompt or character.prompt_base or character.name
+    style_preset = request.style_preset or "anime style"
+    negative_prompt = request.negative_prompt
+
+    all_created_images = []
+
+    for variant in variants:
+        pose = variant.get("pose", "")
+        expression = variant.get("expression", "")
+        angle = variant.get("angle", "")
+        custom = variant.get("custom_prompt", "")
+
+        variant_parts = [p for p in [pose, expression, angle, custom] if p]
+        variant_desc = ", ".join(variant_parts) if variant_parts else "portrait"
+        full_prompt = f"{base_prompt}, {variant_desc}"
+
+        try:
+            candidates = asset_service.manager.generate_reference_images(
+                character=character,
+                style_spec=style_preset,
+                n=1,
+                project_id=character.project_id,
+                style_preset=style_preset,
+                negative_prompt=negative_prompt,
+                prompt_override=full_prompt,
+                reference_image=character.anchor_image_path or character.anchor_image_url,
+            )
+
+            if candidates:
+                for candidate in candidates:
+                    metadata = dict(variant)
+                    metadata["negative_prompt"] = negative_prompt
+                    metadata["seed"] = candidate.seed
+                    image = CharacterImage(
+                        character_id=character_id,
+                        image_type=CharacterImageType.VARIANT,
+                        image_path=candidate.local_path,
+                        image_url=candidate.oss_url,
+                        prompt=full_prompt,
+                        pose=pose or None,
+                        expression=expression or None,
+                        angle=angle or None,
+                        style_preset=style_preset,
+                        generation_metadata=metadata,
+                    )
+                    session.add(image)
+                    all_created_images.append(image)
+
+        except Exception as e:
+            logger.warning(f"Failed to generate variant {variant}: {e}")
+            continue
+
+    session.commit()
+
+    for img in all_created_images:
+        session.refresh(img)
+
+    logger.info(f"Batch generated {len(all_created_images)} variant images for {character_id}")
+
+    return CharacterImageListResponse(
+        items=[CharacterImageResponse.model_validate(img) for img in all_created_images],
+        total=len(all_created_images),
+    )
+
+
+@router.get(
+    "/characters/{character_id}/training-images",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+def get_training_images(
+    character_id: str,
+    session: DBSession,
+) -> CharacterImageListResponse:
+    """获取标记为训练的图片列表（用于 LoRA 训练）"""
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    query = (
+        select(CharacterImage)
+        .where(CharacterImage.character_id == character_id)
+        .where(CharacterImage.is_selected_for_training == True)
+        .order_by(CharacterImage.created_at)
+    )
+    images = session.exec(query).all()
+
+    return CharacterImageListResponse(
+        items=[CharacterImageResponse.model_validate(img) for img in images],
+        total=len(images),
+    )

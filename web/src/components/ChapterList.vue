@@ -4,6 +4,9 @@
     <div class="flex justify-between items-center">
       <h3 class="text-lg font-semibold text-white">章节列表</h3>
       <div class="flex gap-2">
+        <n-button type="primary" @click="showScanModal = true" :disabled="chapters.length === 0">
+          扫描角色
+        </n-button>
         <n-button @click="showAddModal = true">
           添加章节
         </n-button>
@@ -50,8 +53,8 @@
                 <n-tag v-if="chapter.emotional_arc" size="tiny" :type="getArcType(chapter.emotional_arc)">
                   {{ getArcLabel(chapter.emotional_arc) }}
                 </n-tag>
-                <n-tag size="tiny" :type="getImportanceType(chapter.importance_score)">
-                  重要性 {{ (chapter.importance_score * 100).toFixed(0) }}%
+                <n-tag size="tiny" :type="getImportanceType(chapter.importance_score ?? 0.5)">
+                  重要性 {{ ((chapter.importance_score ?? 0.5) * 100).toFixed(0) }}%
                 </n-tag>
               </div>
               <p class="text-gray-500 text-xs mt-1 line-clamp-1">
@@ -90,6 +93,16 @@
       v-model:show="showDetailModal"
       :project-id="projectId"
       :chapter-number="selectedChapterNumber"
+      @analyzed="loadChapters"
+    />
+
+    <!-- Character Scan Modal -->
+    <CharacterScanModal
+      v-model:show="showScanModal"
+      :project-id="projectId"
+      :chapters="chapters"
+      :existing-characters="existingCharacters"
+      @characters-updated="handleCharactersUpdated"
     />
   </div>
 </template>
@@ -98,13 +111,18 @@
 import { ref, computed, onMounted } from 'vue'
 import { NButton, NIcon, NSpin, NEmpty, NTag, useDialog, useMessage } from 'naive-ui'
 import { apiClient } from '@/api/client'
-import type { Chapter } from '@/types/api'
+import type { Chapter, Character } from '@/types/api'
 import ChapterStatusBadge from './ChapterStatusBadge.vue'
 import AddChapterModal from './AddChapterModal.vue'
 import ChapterDetailModal from './ChapterDetailModal.vue'
+import CharacterScanModal from './CharacterScanModal.vue'
 
 const props = defineProps<{
   projectId: string
+}>()
+
+const emit = defineEmits<{
+  'characters-updated': []
 }>()
 
 const dialog = useDialog()
@@ -112,8 +130,10 @@ const message = useMessage()
 
 const loading = ref(false)
 const chapters = ref<Chapter[]>([])
+const existingCharacters = ref<Character[]>([])
 const showAddModal = ref(false)
 const showDetailModal = ref(false)
+const showScanModal = ref(false)
 const selectedChapterNumber = ref<number | null>(null)
 
 const nextChapterNumber = computed(() => {
@@ -159,6 +179,7 @@ function getImportanceType(score: number): 'default' | 'info' | 'success' | 'war
 
 onMounted(() => {
   loadChapters()
+  loadExistingCharacters()
 })
 
 async function loadChapters() {
@@ -171,6 +192,20 @@ async function loadChapters() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadExistingCharacters() {
+  try {
+    const response = await apiClient.listCharacters(props.projectId)
+    existingCharacters.value = response.items
+  } catch (error) {
+    console.error('Failed to load characters:', error)
+  }
+}
+
+function handleCharactersUpdated() {
+  loadExistingCharacters()
+  emit('characters-updated')
 }
 
 function handleViewChapter(chapter: Chapter) {

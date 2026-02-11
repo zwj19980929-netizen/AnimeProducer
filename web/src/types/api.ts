@@ -56,6 +56,16 @@ export enum EpisodeStatus {
   FAILED = 'FAILED'
 }
 
+export enum LoRATrainingStatus {
+  PENDING = 'PENDING',
+  GENERATING_DATASET = 'GENERATING_DATASET',
+  DATASET_READY = 'DATASET_READY',
+  UPLOADING = 'UPLOADING',
+  TRAINING = 'TRAINING',
+  READY = 'READY',
+  FAILED = 'FAILED'
+}
+
 // Metadata types - use specific interfaces instead of Record<string, any>
 export interface ProjectMetadata {
   genre?: string
@@ -136,14 +146,18 @@ export interface ProjectStatusUpdate {
 export interface CharacterCreate {
   character_id: string
   name: string
-  prompt_base: string
-  reference_image_path: string
+  appearance_prompt?: string
+  bio?: string
+  prompt_base?: string
+  reference_image_path?: string
   voice_id?: string
   character_metadata?: CharacterMetadata
 }
 
 export interface CharacterUpdate {
   name?: string
+  appearance_prompt?: string
+  bio?: string
   prompt_base?: string
   reference_image_path?: string
   voice_id?: string
@@ -154,17 +168,89 @@ export interface Character {
   character_id: string
   project_id: string
   name: string
+  aliases?: string[]
+  appearance_prompt?: string
+  bio?: string
   prompt_base?: string
+  first_appearance_chapter?: number
   reference_image_path?: string
   reference_image_url?: string
+  anchor_image_id?: string
+  anchor_image_path?: string
+  anchor_image_url?: string
   voice_id?: string
   character_metadata?: CharacterMetadata
   created_at: string
+  updated_at?: string
+}
+
+export enum CharacterImageType {
+  CANDIDATE = 'CANDIDATE',
+  ANCHOR = 'ANCHOR',
+  VARIANT = 'VARIANT',
+  TRAINING = 'TRAINING',
+  CUSTOM = 'CUSTOM'
+}
+
+export interface CharacterImage {
+  id: string
+  character_id: string
+  image_type: CharacterImageType
+  image_path: string
+  image_url?: string
+  thumbnail_url?: string
+  prompt: string
+  pose?: string
+  expression?: string
+  angle?: string
+  style_preset?: string
+  is_selected_for_training: boolean
+  is_anchor: boolean
+  quality_score?: number
+  created_at: string
+}
+
+export interface CharacterImageListResponse {
+  items: CharacterImage[]
+  total: number
+}
+
+export interface GenerateVariantRequest {
+  pose?: string
+  expression?: string
+  angle?: string
+  custom_prompt?: string
+  style_preset?: string
+  negative_prompt?: string
+  seed?: number
+  num_images?: number
+}
+
+export interface BatchGenerateVariantRequest {
+  variants?: Array<{
+    pose?: string
+    expression?: string
+    angle?: string
+    custom_prompt?: string
+  }>
+  style_preset?: string
+  negative_prompt?: string
+}
+
+export interface SetAnchorImageRequest {
+  image_id: string
+}
+
+export interface MarkTrainingImagesRequest {
+  image_ids: string[]
+  selected: boolean
 }
 
 export interface GenerateReferenceRequest {
   custom_prompt?: string
   style_preset?: string
+  negative_prompt?: string
+  seed?: number
   num_candidates?: number
 }
 
@@ -318,8 +404,8 @@ export interface Chapter {
   content: string
   word_count: number
   key_events: string[]
-  emotional_arc?: string
-  importance_score: number
+  emotional_arc?: string | null
+  importance_score?: number | null
   suggested_episode?: number
   characters_appeared: string[]
   status: ChapterStatus
@@ -563,4 +649,79 @@ export interface ConfigStatusResponse {
       configured: boolean
     }
   }
+}
+
+// LoRA Training Types
+export interface LoRAStartTrainingRequest {
+  character_id: string
+  ancestor_image_path?: string
+  image_ids?: string[]
+  use_selected_images?: boolean
+  num_dataset_images?: number
+  training_steps?: number
+  provider?: 'fal' | 'replicate'
+}
+
+export interface CharacterLoRA {
+  id: string
+  character_id: string
+  trigger_word: string
+  status: LoRATrainingStatus
+  progress: number
+  lora_url?: string
+  dataset_size: number
+  training_provider: string
+  error_message?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface LoRATrainingStatusResponse {
+  lora_id: string
+  status: LoRATrainingStatus
+  progress: number
+  lora_url?: string
+  error_message?: string
+}
+
+export interface LoRAListResponse {
+  items: CharacterLoRA[]
+  total: number
+}
+
+// Provider Health Status Types
+export interface ProviderHealthStatus {
+  is_healthy: boolean
+  consecutive_failures: number
+  failure_rate: number
+  total_requests: number
+  last_failure?: string
+  last_success?: string
+}
+
+export interface ProviderStatusResponse {
+  [provider: string]: ProviderHealthStatus
+}
+
+// Auth Types
+export interface LoginRequest {
+  username: string
+  password: string
+}
+
+export interface RegisterRequest {
+  username: string
+  password: string
+}
+
+export interface Token {
+  access_token: string
+  token_type: string
+  expires_in: number
+}
+
+export interface User {
+  username: string
+  disabled: boolean
+  scopes: string[]
 }

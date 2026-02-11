@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 class CharacterDraft:
     """Draft character extracted from novel text."""
     name: str
+    aliases: List[str] = field(default_factory=list)  # 别名列表
     hair_color: str = ""
     eye_color: str = ""
     clothing: str = ""
@@ -36,6 +37,7 @@ class CharacterDraft:
     age_range: str = ""
     first_appearance_chapter: int = 0
     evolution_type: str = ""  # "new", "evolution", or empty
+    suspected_same_as: str = ""  # 可疑关联：可能与某个已有角色是同一人
 
     def to_prompt_base(self) -> str:
         parts = []
@@ -59,12 +61,27 @@ class CharacterDraft:
 
 @dataclass
 class Candidate:
-    path: str
+    path: str  # Primary path (could be local or OSS URL)
     seed: int
     prompt: str
     generation_params: Dict
     score: float = 0.0
     version: int = 1
+
+    @property
+    def is_oss_url(self) -> bool:
+        """Check if path is an OSS URL."""
+        return self.path.startswith("http://") or self.path.startswith("https://")
+
+    @property
+    def local_path(self) -> Optional[str]:
+        """Get local path if available."""
+        return None if self.is_oss_url else self.path
+
+    @property
+    def oss_url(self) -> Optional[str]:
+        """Get OSS URL if available."""
+        return self.path if self.is_oss_url else None
 
 
 class CharacterListResponse(BaseModel):
@@ -75,6 +92,14 @@ class CharacterEvolutionResponse(BaseModel):
     """Response model for incremental character extraction."""
     new_characters: List[dict]  # New characters discovered
     character_evolutions: List[dict]  # {character_name, evolution_type, new_traits}
+
+
+class BatchCharacterExtractionResponse(BaseModel):
+    """Response model for batch character extraction with alias detection."""
+    new_characters: List[dict]  # 新发现的角色
+    character_evolutions: List[dict]  # 角色形象变化
+    alias_detections: List[dict]  # 检测到的别名 {character_name, new_alias, confidence}
+    suspected_identities: List[dict]  # 可疑身份关联 {new_character, existing_character, reason, confidence}
 
 
 class AssetManager:
@@ -290,6 +315,164 @@ Return ONLY the valid JSON object."""
             logger.error(f"Error extracting characters from chapter {chapter_number}: {e}")
             return []
 
+    def batch_extract_characters_from_chapters(
+        self,
+        chapters_content: List[Dict[str, Any]],
+        existing_characters: List[Dict[str, Any]],
+        project_context: str = ""
+    ) -> Dict[str, Any]:
+        """
+        批量从多个章节提取角色，支持别名识别和可疑身份关联检测。
+
+        :param chapters_content: 章节列表 [{chapter_number, title, content}, ...]
+        :param existing_characters: 已有角色完整信息 [{name, aliases, appearance_prompt, bio, first_appearance_chapter}, ...]
+        :param project_context: 项目背景信息（如小说类型、世界观等）
+        :return: 包含新角色、别名、可疑关联的结果
+        """
+        if not chapters_content:
+            return {"new_characters": [], "character_evolutions": [], "alias_detections": [], "suspected_identities": []}
+
+        chapter_range = f"{chapters_content[0]['chapter_number']}-{chapters_content[-1]['chapter_number']}"
+        logger.info(f"Batch extracting characters from chapters {chapter_range}, "
+                    f"existing characters: {len(existing_characters)}")
+
+        # 构建已有角色的详细描述
+        existing_chars_desc = []
+        for char in existing_characters:
+            aliases_str = f"（别名：{', '.join(char.get('aliases', []))}）" if char.get('aliases') else ""
+            desc = f"- {char['name']}{aliases_str}: {char.get('appearance_prompt', '无外貌描述')}"
+            if char.get('bio'):
+                desc += f" | 简介: {char['bio'][:100]}"
+            if char.get('first_appearance_chapter'):
+                desc += f" | 首次出场: 第{char['first_appearance_chapter']}章"
+            existing_chars_desc.append(desc)
+
+        existing_chars_str = "\n".join(existing_chars_desc) if existing_chars_desc else "（暂无已知角色）"
+
+        # 合并章节内容
+        chapters_text = ""
+        for ch in chapters_content:
+            chapters_text += f"\n\n=== 第{ch['chapter_number']}章"
+            if ch.get('title'):
+                chapters_text += f": {ch['title']}"
+            chapters_text += f" ===\n{ch['content']}"
+
+        # 限制总长度
+        max_content_length = 25000
+        if len(chapters_text) > max_content_length:
+            chapters_text = chapters_text[:max_content_length] + "\n...(内容过长已截断)"
+
+        prompt = f"""你是一位专业的小说角色分析师，擅长识别角色身份和别名关系。
+
+## 任务
+分析以下章节内容，完成：
+1. 提取新出现的重要角色（排除已知角色）
+2. 检测已知角色的新别名/称呼
+3. 识别可疑的身份关联（某个新角色可能是已知角色的伪装/化身/隐藏身份）
+4. 检测角色的外貌变化（换装、变身等）
+
+## 已知角色列表（包含别名和外貌特征）
+{existing_chars_str}
+
+## 项目背景
+{project_context or "无特殊背景"}
+
+## 章节内容
+{chapters_text}
+
+## 分析要点
+
+### 别名识别
+小说中同一角色可能有多种称呼：
+- 全名/简称（如"李明"和"小明"）
+- 职位/身份称呼（如"李总"、"那个医生"）
+- 亲昵称呼（如"阿明"、"明哥"）
+- 外号/绰号
+
+### 可疑身份关联
+注意以下情况可能暗示两个角色是同一人：
+- 外貌特征高度相似但名字不同
+- 从不同时出现在同一场景
+- 有暗示性的描写（如"似曾相识的眼神"）
+- 隐藏身份/伪装的剧情暗示
+- 神秘人物的特征与已知角色吻合
+
+### 新角色判定
+只提取真正的新角色：
+- 有名字或明确称呼
+- 有一定戏份（不是路人甲）
+- 不是已知角色的别名
+
+## 输出格式
+返回 JSON 对象：
+{{
+    "new_characters": [
+        {{
+            "name": "角色名",
+            "aliases": ["可能的别名1", "别名2"],
+            "hair_color": "发色",
+            "eye_color": "眼睛颜色",
+            "clothing": "服装描述",
+            "physical_features": "其他外貌特征",
+            "age_range": "年龄段",
+            "personality_keywords": ["性格关键词"],
+            "first_appearance_chapter": 章节号
+        }}
+    ],
+    "character_evolutions": [
+        {{
+            "character_name": "已知角色名",
+            "evolution_type": "变化类型（换装/变身/黑化/受伤等）",
+            "trigger_chapter": 章节号,
+            "new_traits": {{
+                "hair_color": "新发色",
+                "clothing": "新服装",
+                "physical_features": "新特征"
+            }}
+        }}
+    ],
+    "alias_detections": [
+        {{
+            "character_name": "已知角色名",
+            "new_alias": "新发现的别名",
+            "context": "出现的上下文",
+            "confidence": "high/medium/low"
+        }}
+    ],
+    "suspected_identities": [
+        {{
+            "new_character": "新角色名或称呼",
+            "existing_character": "可能对应的已知角色名",
+            "reason": "判断依据",
+            "confidence": "high/medium/low",
+            "evidence": ["证据1", "证据2"]
+        }}
+    ]
+}}
+
+只返回 JSON，不要其他内容。"""
+
+        try:
+            result = llm_client.generate_structured_output(
+                prompt, BatchCharacterExtractionResponse, temperature=0.1
+            )
+            if result is None:
+                return {"new_characters": [], "character_evolutions": [], "alias_detections": [], "suspected_identities": []}
+
+            logger.info(f"Batch extraction result: {len(result.new_characters)} new characters, "
+                        f"{len(result.alias_detections)} aliases, {len(result.suspected_identities)} suspected identities")
+
+            return {
+                "new_characters": result.new_characters,
+                "character_evolutions": result.character_evolutions,
+                "alias_detections": result.alias_detections,
+                "suspected_identities": result.suspected_identities
+            }
+
+        except Exception as e:
+            logger.error(f"Error in batch character extraction: {e}")
+            return {"new_characters": [], "character_evolutions": [], "alias_detections": [], "suspected_identities": []}
+
     def process_chapter_for_characters(
         self,
         project_id: str,
@@ -391,6 +574,306 @@ Return ONLY the valid JSON object."""
             if should_close:
                 db.close()
 
+    def process_chapters_batch_for_characters(
+        self,
+        project_id: str,
+        chapter_numbers: List[int],
+        session: Optional[Session] = None,
+        auto_create: bool = True
+    ) -> Dict[str, Any]:
+        """
+        批量处理多个章节的角色发现（支持别名和可疑身份检测）。
+
+        :param project_id: Project ID
+        :param chapter_numbers: 要扫描的章节号列表（最多10章）
+        :param session: Optional database session
+        :param auto_create: 是否自动创建新角色（False则只返回分析结果）
+        :return: 包含新角色、别名、可疑关联的完整结果
+        """
+        from core.models import Chapter
+
+        if len(chapter_numbers) > 10:
+            raise ValueError("一次最多扫描10个章节")
+
+        logger.info(f"Batch processing chapters {chapter_numbers} for project {project_id}")
+
+        db = session or self.session
+        should_close = False
+        if not db:
+            db = Session(engine)
+            should_close = True
+
+        try:
+            # 1. 获取章节内容
+            chapters_content = []
+            for ch_num in sorted(chapter_numbers):
+                statement = select(Chapter).where(
+                    Chapter.project_id == project_id,
+                    Chapter.chapter_number == ch_num
+                )
+                chapter = db.exec(statement).first()
+                if chapter:
+                    chapters_content.append({
+                        "chapter_number": chapter.chapter_number,
+                        "title": chapter.title,
+                        "content": chapter.content
+                    })
+
+            if not chapters_content:
+                return {
+                    "project_id": project_id,
+                    "chapters_scanned": [],
+                    "new_characters": [],
+                    "character_evolutions": [],
+                    "alias_detections": [],
+                    "suspected_identities": [],
+                    "characters_created": []
+                }
+
+            # 2. 获取已有角色的完整信息
+            statement = select(Character).where(Character.project_id == project_id)
+            existing_chars = db.exec(statement).all()
+            existing_characters = []
+            for c in existing_chars:
+                existing_characters.append({
+                    "name": c.name,
+                    "aliases": c.aliases or [],
+                    "appearance_prompt": c.appearance_prompt,
+                    "bio": c.bio,
+                    "first_appearance_chapter": c.first_appearance_chapter
+                })
+
+            # 3. 调用批量提取
+            extraction_result = self.batch_extract_characters_from_chapters(
+                chapters_content=chapters_content,
+                existing_characters=existing_characters
+            )
+
+            characters_created = []
+
+            # 4. 处理别名检测 - 更新已有角色的别名
+            for alias_info in extraction_result.get("alias_detections", []):
+                char_name = alias_info.get("character_name")
+                new_alias = alias_info.get("new_alias")
+                if char_name and new_alias:
+                    for c in existing_chars:
+                        if c.name == char_name:
+                            if not c.aliases:
+                                c.aliases = []
+                            if new_alias not in c.aliases:
+                                c.aliases.append(new_alias)
+                                db.add(c)
+                                logger.info(f"Added alias '{new_alias}' to character '{char_name}'")
+                            break
+
+            # 5. 如果 auto_create，创建新角色
+            if auto_create:
+                for char_data in extraction_result.get("new_characters", []):
+                    draft = CharacterDraft(
+                        name=char_data.get("name", "Unknown"),
+                        aliases=char_data.get("aliases", []),
+                        hair_color=char_data.get("hair_color", ""),
+                        eye_color=char_data.get("eye_color", ""),
+                        clothing=char_data.get("clothing", ""),
+                        personality_keywords=char_data.get("personality_keywords", []),
+                        physical_features=char_data.get("physical_features", ""),
+                        age_range=char_data.get("age_range", ""),
+                        first_appearance_chapter=char_data.get("first_appearance_chapter", chapter_numbers[0]),
+                        evolution_type="new"
+                    )
+                    character = self.create_or_update_character(project_id, draft, session=db)
+                    # 更新别名
+                    if draft.aliases:
+                        character.aliases = draft.aliases
+                        db.add(character)
+                    characters_created.append({
+                        "character_id": character.character_id,
+                        "name": character.name,
+                        "aliases": draft.aliases
+                    })
+
+            # 6. 处理角色进化
+            existing_char_map = {c.name: c for c in existing_chars}
+            for evo_data in extraction_result.get("character_evolutions", []):
+                char_name = evo_data.get("character_name")
+                if char_name and char_name in existing_char_map:
+                    existing_char = existing_char_map[char_name]
+                    new_traits = evo_data.get("new_traits", {})
+                    state = CharacterState(
+                        character_id=existing_char.character_id,
+                        state_name=evo_data.get("evolution_type", "evolution"),
+                        trigger_chapter=evo_data.get("trigger_chapter", chapter_numbers[0]),
+                        visual_changes=new_traits,
+                        prompt_override=", ".join(f"{k}: {v}" for k, v in new_traits.items() if v)
+                    )
+                    db.add(state)
+
+            db.commit()
+
+            result = {
+                "project_id": project_id,
+                "chapters_scanned": [ch["chapter_number"] for ch in chapters_content],
+                "new_characters": extraction_result.get("new_characters", []),
+                "character_evolutions": extraction_result.get("character_evolutions", []),
+                "alias_detections": extraction_result.get("alias_detections", []),
+                "suspected_identities": extraction_result.get("suspected_identities", []),
+                "characters_created": characters_created
+            }
+
+            logger.info(f"Batch processing complete: {len(characters_created)} characters created, "
+                        f"{len(extraction_result.get('alias_detections', []))} aliases detected, "
+                        f"{len(extraction_result.get('suspected_identities', []))} suspected identities")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in batch processing chapters: {e}")
+            if should_close:
+                db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
+    def merge_characters(
+        self,
+        project_id: str,
+        primary_character_id: str,
+        secondary_character_id: str,
+        session: Optional[Session] = None
+    ) -> Character:
+        """
+        合并两个角色（当确认是同一人时）。
+
+        将 secondary 角色的信息合并到 primary 角色，然后删除 secondary。
+        - secondary 的名字变成 primary 的别名
+        - secondary 的 CharacterState 转移到 primary
+        - secondary 的图片转移到 primary
+
+        :param project_id: Project ID
+        :param primary_character_id: 保留的主角色 ID
+        :param secondary_character_id: 要合并进来的角色 ID
+        :return: 合并后的角色
+        """
+        from core.models import CharacterImage
+
+        logger.info(f"Merging character '{secondary_character_id}' into '{primary_character_id}'")
+
+        db = session or self.session
+        should_close = False
+        if not db:
+            db = Session(engine)
+            should_close = True
+
+        try:
+            primary = db.get(Character, primary_character_id)
+            secondary = db.get(Character, secondary_character_id)
+
+            if not primary:
+                raise ValueError(f"Primary character not found: {primary_character_id}")
+            if not secondary:
+                raise ValueError(f"Secondary character not found: {secondary_character_id}")
+
+            # 1. 将 secondary 的名字添加为 primary 的别名
+            if not primary.aliases:
+                primary.aliases = []
+            if secondary.name not in primary.aliases:
+                primary.aliases.append(secondary.name)
+            # 也把 secondary 的别名合并过来
+            for alias in (secondary.aliases or []):
+                if alias not in primary.aliases and alias != primary.name:
+                    primary.aliases.append(alias)
+
+            # 2. 合并 bio（如果 primary 没有的话）
+            if not primary.bio and secondary.bio:
+                primary.bio = secondary.bio
+            elif primary.bio and secondary.bio:
+                primary.bio = f"{primary.bio}\n\n[合并自 {secondary.name}]: {secondary.bio}"
+
+            # 3. 转移 CharacterState
+            statement = select(CharacterState).where(CharacterState.character_id == secondary_character_id)
+            states = db.exec(statement).all()
+            for state in states:
+                state.character_id = primary_character_id
+                db.add(state)
+
+            # 4. 转移 CharacterImage
+            statement = select(CharacterImage).where(CharacterImage.character_id == secondary_character_id)
+            images = db.exec(statement).all()
+            for img in images:
+                img.character_id = primary_character_id
+                db.add(img)
+
+            # 5. 更新 primary
+            primary.updated_at = datetime.utcnow()
+            db.add(primary)
+
+            # 6. 删除 secondary
+            db.delete(secondary)
+
+            db.commit()
+            db.refresh(primary)
+
+            logger.info(f"Merged '{secondary.name}' into '{primary.name}', "
+                        f"aliases now: {primary.aliases}")
+
+            return primary
+
+        except Exception as e:
+            logger.error(f"Error merging characters: {e}")
+            if should_close:
+                db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
+    def add_character_alias(
+        self,
+        character_id: str,
+        alias: str,
+        session: Optional[Session] = None
+    ) -> Character:
+        """
+        为角色添加别名。
+
+        :param character_id: 角色 ID
+        :param alias: 要添加的别名
+        :return: 更新后的角色
+        """
+        db = session or self.session
+        should_close = False
+        if not db:
+            db = Session(engine)
+            should_close = True
+
+        try:
+            character = db.get(Character, character_id)
+            if not character:
+                raise ValueError(f"Character not found: {character_id}")
+
+            if not character.aliases:
+                character.aliases = []
+
+            if alias not in character.aliases and alias != character.name:
+                character.aliases.append(alias)
+                character.updated_at = datetime.utcnow()
+                db.add(character)
+                db.commit()
+                db.refresh(character)
+                logger.info(f"Added alias '{alias}' to character '{character.name}'")
+
+            return character
+
+        except Exception as e:
+            logger.error(f"Error adding alias: {e}")
+            if should_close:
+                db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
     def create_or_update_character(
         self,
         project_id: str,
@@ -399,7 +882,7 @@ Return ONLY the valid JSON object."""
     ) -> Character:
         logger.info(f"Creating/updating character '{draft.name}' for project '{project_id}'")
 
-        character_id = f"{project_id}_{draft.name.lower().replace(' ', '_')}"
+        character_id = f"{project_id}_{draft.name.lower().replace(' ', '_').replace('/', '_')}"
         prompt_base = draft.to_prompt_base()
 
         character_dir = self._get_character_dir(project_id, character_id)
@@ -416,9 +899,18 @@ Return ONLY the valid JSON object."""
             existing = db.get(Character, character_id)
             if existing:
                 existing.prompt_base = prompt_base
+                existing.appearance_prompt = prompt_base
                 existing.reference_image_path = reference_image_path
                 if not existing.project_id:
                     existing.project_id = project_id
+                # 合并别名
+                if draft.aliases:
+                    if not existing.aliases:
+                        existing.aliases = []
+                    for alias in draft.aliases:
+                        if alias not in existing.aliases:
+                            existing.aliases.append(alias)
+                existing.updated_at = datetime.utcnow()
 
                 db.add(existing)
                 db.commit()
@@ -429,8 +921,11 @@ Return ONLY the valid JSON object."""
                     character_id=character_id,
                     project_id=project_id,
                     name=draft.name,
+                    aliases=draft.aliases or [],
+                    appearance_prompt=prompt_base,
                     prompt_base=prompt_base,
-                    reference_image_path=reference_image_path
+                    reference_image_path=reference_image_path,
+                    first_appearance_chapter=draft.first_appearance_chapter
                 )
                 db.add(character)
                 db.commit()
@@ -450,7 +945,11 @@ Return ONLY the valid JSON object."""
         style_spec: str,
         n: int = 4,
         project_id: Optional[str] = None,
-        style_preset: Optional[str] = None
+        style_preset: Optional[str] = None,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        prompt_override: Optional[str] = None,
+        reference_image: Optional[str] = None,
     ) -> List[Candidate]:
         """
         Generate reference images for a character.
@@ -460,6 +959,10 @@ Return ONLY the valid JSON object."""
         :param n: Number of candidate images to generate
         :param project_id: Optional project ID override
         :param style_preset: Optional global style preset to enforce consistent art style
+        :param negative_prompt: Optional negative prompt describing what to avoid
+        :param seed: Optional random seed for reproducibility (will increment for each candidate)
+        :param prompt_override: Optional prompt to use instead of character's prompt_base
+        :param reference_image: Optional reference image path/URL for image-to-image generation
         """
         if project_id is None:
             # 如果 character 对象里有 project_id 最好，没有则尝试从 ID 解析
@@ -475,40 +978,56 @@ Return ONLY the valid JSON object."""
         character_dir = self._get_character_dir(project_id, character.character_id)
         self._ensure_dir(character_dir)
         version = self._get_next_version(character_dir)
-        full_prompt = f"{character.prompt_base}, {style_spec}, character reference sheet, best quality"
+
+        # 使用 prompt_override 或默认的 prompt_base
+        base_prompt = prompt_override or character.appearance_prompt or character.prompt_base
+        full_prompt = f"{base_prompt}, {style_spec}, character reference sheet, best quality"
 
         candidates = []
         for i in range(n):
-            seed = int(datetime.now().timestamp() * 1000) + i
+            # 如果指定了 seed，每个候选使用递增的 seed
+            current_seed = (seed + i) if seed is not None else int(datetime.now().timestamp() * 1000) + i
+
             generation_params = {
-                "prompt": full_prompt, "seed": seed, "style_spec": style_spec,
+                "prompt": full_prompt,
+                "seed": current_seed,
+                "style_spec": style_spec,
                 "style_preset": style_preset,
-                "width": 1024, "height": 1024, "timestamp": datetime.now().isoformat()
+                "negative_prompt": negative_prompt,
+                "width": 1024,
+                "height": 1024,
+                "timestamp": datetime.now().isoformat()
             }
             try:
-                # 调用绘图接口，传入 style_preset 以确保画风一致性
-                image_bytes = gen_client.generate_image(full_prompt, style_preset=style_preset)
+                # 调用绘图接口，传入所有参数
+                image_bytes = gen_client.generate_image(
+                    full_prompt,
+                    reference_image_path=reference_image,
+                    style_preset=style_preset,
+                    negative_prompt=negative_prompt,
+                    seed=current_seed
+                )
                 if image_bytes:
                     if use_oss:
                         # 直接上传到 OSS
                         oss = OSSService.get_instance()
-                        filename = f"char_{character.character_id}_v{version}_ref_{i+1}_seed{seed}"
+                        filename = f"char_{character.character_id}_v{version}_ref_{i+1}_seed{current_seed}"
                         image_url = oss.upload_image_bytes(image_bytes, filename=filename)
                         candidates.append(Candidate(
-                            path=image_url, seed=seed, prompt=full_prompt,
+                            path=image_url, seed=current_seed, prompt=full_prompt,
                             generation_params=generation_params, version=version
                         ))
                         logger.info(f"角色参考图已上传到 OSS: {image_url}")
                     else:
                         # 保存到本地
-                        image_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.png"
+                        image_path = character_dir / f"v{version}_ref_{i+1}_seed{current_seed}.png"
                         with open(image_path, "wb") as f: f.write(image_bytes)
 
-                        params_path = character_dir / f"v{version}_ref_{i+1}_seed{seed}.json"
+                        params_path = character_dir / f"v{version}_ref_{i+1}_seed{current_seed}.json"
                         with open(params_path, "w") as f: json.dump(generation_params, f, indent=2)
 
                         candidates.append(Candidate(
-                            path=str(image_path), seed=seed, prompt=full_prompt,
+                            path=str(image_path), seed=current_seed, prompt=full_prompt,
                             generation_params=generation_params, version=version
                         ))
             except Exception as e:

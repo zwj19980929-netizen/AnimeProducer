@@ -104,13 +104,13 @@
               <BookUpload :project-id="project.id" @chapters-updated="handleChaptersUpdated" />
             </n-tab-pane>
             <n-tab-pane name="chapters" tab="章节">
-              <ChapterList ref="chapterListRef" :project-id="project.id" />
+              <ChapterList ref="chapterListRef" :project-id="project.id" @characters-updated="handleCharactersRefresh" />
             </n-tab-pane>
             <n-tab-pane name="episodes" tab="集">
               <EpisodeList :project-id="project.id" :chapter-count="chapterCount" />
             </n-tab-pane>
             <n-tab-pane name="characters" tab="角色">
-              <CharacterList :project-id="project.id" />
+              <CharacterList ref="characterListRef" :project-id="project.id" />
             </n-tab-pane>
             <n-tab-pane name="shots" tab="故事板">
               <ShotList :project-id="project.id" />
@@ -192,6 +192,7 @@ const {
 
 const showEditModal = ref(false)
 const chapterListRef = ref<InstanceType<typeof ChapterList> | null>(null)
+const characterListRef = ref<InstanceType<typeof CharacterList> | null>(null)
 const chapterCount = ref(0)
 const buildingFromChapters = ref(false)
 
@@ -208,6 +209,10 @@ async function loadChapterCount() {
 function handleChaptersUpdated() {
   loadChapterCount()
   chapterListRef.value?.loadChapters?.()
+}
+
+function handleCharactersRefresh() {
+  characterListRef.value?.loadCharacters?.()
 }
 
 const actionOptions = computed(() => [

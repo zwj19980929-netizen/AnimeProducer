@@ -422,6 +422,16 @@ def analyze_chapter(
         previous_summary=previous_summary
     )
 
+    # 检查分析结果是否有效（至少要有关键事件）
+    if not analysis.key_events:
+        chapter.status = ChapterStatus.FAILED
+        session.add(chapter)
+        session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="章节分析失败：LLM 未返回有效结果，请检查 LLM 配置（GOOGLE_API_KEY 或其他 LLM Provider）"
+        )
+
     # 更新章节记录
     chapter.key_events = analysis.key_events
     chapter.emotional_arc = analysis.emotional_arc
@@ -517,3 +527,200 @@ def analyze_all_chapters(
         analyzed_count=len(results),
         results=results,
     )
+
+
+# ============================================================================
+# 角色扫描 API
+# ============================================================================
+
+
+@router.post(
+    "/extract-characters",
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def extract_characters_from_chapters(
+    project_id: str,
+    session: DBSession,
+    chapter_numbers: list[int] = Query(..., description="要扫描的章节号列表（最多10章）"),
+    auto_create: bool = Query(default=True, description="是否自动创建新角色"),
+):
+    """
+    从指定章节批量扫描角色。
+
+    功能：
+    - 提取新角色（包含外貌特征）
+    - 识别角色别名（同一角色的不同称呼）
+    - 检测可疑身份关联（可能是同一人的不同角色）
+    - 检测角色形象变化（换装、变身等）
+
+    注意：
+    - 一次最多扫描10章
+    - 会自动排除已有角色
+    - 可疑身份关联需要人工确认后手动合并
+    """
+    logger.info(f"Extracting characters from chapters {chapter_numbers} for project: {project_id}")
+
+    _get_project_or_404(session, project_id)
+
+    if len(chapter_numbers) > 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="一次最多扫描10个章节",
+        )
+
+    if len(chapter_numbers) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请至少选择一个章节",
+        )
+
+    # 检查章节是否存在
+    existing_chapters = session.exec(
+        select(Chapter.chapter_number).where(
+            Chapter.project_id == project_id,
+            Chapter.chapter_number.in_(chapter_numbers)
+        )
+    ).all()
+
+    missing = set(chapter_numbers) - set(existing_chapters)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"章节不存在: {sorted(missing)}",
+        )
+
+    # 调用 AssetManager 进行批量扫描
+    from core.asset_manager import asset_manager
+    result = asset_manager.process_chapters_batch_for_characters(
+        project_id=project_id,
+        chapter_numbers=chapter_numbers,
+        session=session,
+        auto_create=auto_create
+    )
+
+    return result
+
+
+@router.post(
+    "/merge-characters",
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+def merge_characters(
+    project_id: str,
+    session: DBSession,
+    primary_character_id: str = Query(..., description="保留的主角色 ID"),
+    secondary_character_id: str = Query(..., description="要合并的角色 ID（将被删除）"),
+):
+    """
+    合并两个角色（确认是同一人时使用）。
+
+    操作：
+    - 将 secondary 角色的名字添加为 primary 的别名
+    - 合并 secondary 的所有别名到 primary
+    - 转移 secondary 的所有图片和状态到 primary
+    - 删除 secondary 角色
+
+    使用场景：
+    - 当确认两个角色实际是同一人时（如隐藏身份揭露）
+    - 当 AI 误将同一角色识别为两个不同角色时
+    """
+    logger.info(f"Merging character '{secondary_character_id}' into '{primary_character_id}'")
+
+    _get_project_or_404(session, project_id)
+
+    from core.asset_manager import asset_manager
+    from core.models import Character
+
+    # 验证角色属于该项目
+    primary = session.get(Character, primary_character_id)
+    secondary = session.get(Character, secondary_character_id)
+
+    if not primary:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"主角色不存在: {primary_character_id}",
+        )
+    if not secondary:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"要合并的角色不存在: {secondary_character_id}",
+        )
+
+    if primary.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"主角色不属于该项目",
+        )
+    if secondary.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"要合并的角色不属于该项目",
+        )
+
+    if primary_character_id == secondary_character_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="不能将角色合并到自己",
+        )
+
+    merged = asset_manager.merge_characters(
+        project_id=project_id,
+        primary_character_id=primary_character_id,
+        secondary_character_id=secondary_character_id,
+        session=session
+    )
+
+    return {
+        "success": True,
+        "merged_character": {
+            "character_id": merged.character_id,
+            "name": merged.name,
+            "aliases": merged.aliases,
+        },
+        "message": f"已将 '{secondary.name}' 合并到 '{merged.name}'"
+    }
+
+
+@router.post(
+    "/add-character-alias",
+    responses={404: {"model": ErrorResponse}},
+)
+def add_character_alias(
+    project_id: str,
+    session: DBSession,
+    character_id: str = Query(..., description="角色 ID"),
+    alias: str = Query(..., description="要添加的别名"),
+):
+    """为角色添加别名。"""
+    logger.info(f"Adding alias '{alias}' to character '{character_id}'")
+
+    _get_project_or_404(session, project_id)
+
+    from core.asset_manager import asset_manager
+    from core.models import Character
+
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"角色不存在: {character_id}",
+        )
+
+    if character.project_id != project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="角色不属于该项目",
+        )
+
+    updated = asset_manager.add_character_alias(
+        character_id=character_id,
+        alias=alias,
+        session=session
+    )
+
+    return {
+        "success": True,
+        "character_id": updated.character_id,
+        "name": updated.name,
+        "aliases": updated.aliases,
+    }

@@ -85,8 +85,10 @@ class CharacterCreate(BaseModel):
     """Request schema for creating a character."""
     character_id: str = Field(..., min_length=1, max_length=100)
     name: str = Field(..., min_length=1, max_length=200)
-    prompt_base: str
-    reference_image_path: str
+    appearance_prompt: str = Field(default="", description="角色外貌描述，用于生成图片")
+    bio: str = Field(default="", description="角色简介/背景故事")
+    prompt_base: str = Field(default="", description="额外的生成提示词（可选）")
+    reference_image_path: str = Field(default="", description="参考图路径（可选，可后续生成）")
     voice_id: str | None = None
     character_metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -94,6 +96,8 @@ class CharacterCreate(BaseModel):
 class CharacterUpdate(BaseModel):
     """Request schema for updating a character."""
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    appearance_prompt: str | None = Field(default=None, description="角色外貌描述")
+    bio: str | None = Field(default=None, description="角色简介")
     prompt_base: str | None = None
     reference_image_path: str | None = None
     voice_id: str | None = None
@@ -136,11 +140,19 @@ class GenerateReferenceRequest(BaseModel):
     """Request schema for generating character reference image."""
     custom_prompt: str | None = Field(
         default=None,
-        description="自定义提示词，会追加到角色的 prompt_base 后面"
+        description="自定义提示词，会追加到角色的 appearance_prompt 后面"
     )
     style_preset: str | None = Field(
         default=None,
         description="风格预设，如 'anime style', 'realistic', 'watercolor' 等"
+    )
+    negative_prompt: str | None = Field(
+        default=None,
+        description="负面提示词，描述不想要的内容，如 'blurry, low quality, deformed'"
+    )
+    seed: int | None = Field(
+        default=None,
+        description="随机种子，用于复现相同的生成结果"
     )
     num_candidates: int = Field(
         default=4,
@@ -150,17 +162,85 @@ class GenerateReferenceRequest(BaseModel):
     )
 
 
+class GenerateVariantRequest(BaseModel):
+    """Request schema for generating character variant images."""
+    pose: str | None = Field(default=None, description="姿态描述，如 'standing', 'sitting', 'running'")
+    expression: str | None = Field(default=None, description="表情描述，如 'smiling', 'serious', 'surprised'")
+    angle: str | None = Field(default=None, description="角度描述，如 'front view', 'side view', 'three-quarter view'")
+    custom_prompt: str | None = Field(default=None, description="自定义提示词（会与外貌描述组合）")
+    style_preset: str | None = Field(default=None, description="风格预设")
+    negative_prompt: str | None = Field(default=None, description="负面提示词，描述不想要的内容")
+    seed: int | None = Field(default=None, description="随机种子，用于复现相同的生成结果")
+    num_images: int = Field(default=1, ge=1, le=4, description="生成图片数量")
+
+
+class BatchGenerateVariantRequest(BaseModel):
+    """Request schema for batch generating character variants."""
+    variants: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="变体列表，每个变体包含 pose, expression, angle 等字段"
+    )
+    style_preset: str | None = Field(default=None, description="统一的风格预设")
+    negative_prompt: str | None = Field(default=None, description="统一的负面提示词")
+
+
+class CharacterImageResponse(BaseModel):
+    """Response schema for character image."""
+    id: str
+    character_id: str
+    image_type: str
+    image_path: str
+    image_url: str | None = None
+    thumbnail_url: str | None = None
+    prompt: str
+    pose: str | None = None
+    expression: str | None = None
+    angle: str | None = None
+    style_preset: str | None = None
+    is_selected_for_training: bool
+    is_anchor: bool
+    quality_score: float | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class CharacterImageListResponse(BaseModel):
+    """Response schema for listing character images."""
+    items: list[CharacterImageResponse]
+    total: int
+
+
+class SetAnchorImageRequest(BaseModel):
+    """Request schema for setting anchor image."""
+    image_id: str = Field(..., description="要设为锚定图的图片 ID")
+
+
+class MarkTrainingImagesRequest(BaseModel):
+    """Request schema for marking images for training."""
+    image_ids: list[str] = Field(..., description="要标记为训练图的图片 ID 列表")
+    selected: bool = Field(default=True, description="是否选中（True=选中，False=取消选中）")
+
+
 class CharacterResponse(BaseModel):
     """Response schema for character data."""
     character_id: str
     project_id: str | None
     name: str
-    prompt_base: str
-    reference_image_path: str
+    aliases: list[str] = Field(default_factory=list)
+    appearance_prompt: str = ""
+    bio: str = ""
+    prompt_base: str = ""
+    first_appearance_chapter: int = 0
+    reference_image_path: str = ""
     reference_image_url: str | None = None
-    voice_id: str | None
-    character_metadata: dict[str, Any]
+    anchor_image_id: str | None = None
+    anchor_image_path: str | None = None
+    anchor_image_url: str | None = None
+    voice_id: str | None = None
+    character_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
