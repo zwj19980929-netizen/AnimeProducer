@@ -210,7 +210,7 @@ class CharacterImage(SQLModel, table=True):
     image_type: CharacterImageType = Field(default=CharacterImageType.CANDIDATE)
 
     # 图片路径
-    image_path: str  # 本地路径
+    image_path: str | None = None  # 本地路径（使用 OSS 时可为空）
     image_url: str | None = None  # OSS URL
     thumbnail_path: str | None = None  # 缩略图路径
     thumbnail_url: str | None = None  # 缩略图 OSS URL

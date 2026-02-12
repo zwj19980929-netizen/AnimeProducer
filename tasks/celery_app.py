@@ -10,7 +10,7 @@ celery_app = Celery(
     "anime_producer",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=["tasks.jobs", "tasks.shots"],
+    include=["tasks.jobs", "tasks.shots", "tasks.assets"],
 )
 
 # Windows 兼容性：使用 solo 池代替 prefork（billiard 在 Windows 上有权限问题）

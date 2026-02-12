@@ -74,8 +74,12 @@ class OSSService:
                     "  ALIYUN_OSS_ENDPOINT=oss-cn-shanghai.aliyuncs.com"
                 )
             import oss2
+            # 禁用代理，阿里云 OSS 是国内服务
             auth = oss2.Auth(self.access_key_id, self.access_key_secret)
-            self._bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name)
+            # 创建 Session 并显式禁用代理
+            session = oss2.Session()
+            session.session.trust_env = False  # 不读取系统代理
+            self._bucket = oss2.Bucket(auth, self.endpoint, self.bucket_name, session=session)
         return self._bucket
 
     def _build_url(self, object_name: str) -> str:

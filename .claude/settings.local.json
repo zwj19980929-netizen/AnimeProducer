@@ -42,7 +42,9 @@
       "Bash(D:)",
       "Bash(cmd /c:*)",
       "Bash(powershell -Command \"cd D:\\\\zwj_project\\\\AnimeProducer; python migrations/add_character_aliases.py\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(alembic revision:*)",
+      "Bash(python -m alembic revision:*)"
     ]
   }
 }

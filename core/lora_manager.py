@@ -268,7 +268,8 @@ class LoRAManager:
     def check_training_status(
         self,
         lora_id: str,
-        session: Optional[Session] = None
+        session: Optional[Session] = None,
+        force_check: bool = False
     ) -> CharacterLoRA:
         """
         检查 LoRA 训练状态
@@ -276,6 +277,7 @@ class LoRAManager:
         Args:
             lora_id: LoRA 记录 ID
             session: 数据库会话
+            force_check: 强制从云端查询状态（即使本地状态是 FAILED）
 
         Returns:
             CharacterLoRA: 更新后的 LoRA 记录
@@ -291,10 +293,21 @@ class LoRAManager:
             if not lora:
                 raise ValueError(f"LoRA not found: {lora_id}")
 
-            if lora.status not in [LoRATrainingStatus.TRAINING, LoRATrainingStatus.UPLOADING]:
+            # 如果状态已经是 READY，直接返回
+            if lora.status == LoRATrainingStatus.READY:
                 return lora
 
+            # 如果没有 training_job_id，无法查询云端状态
             if not lora.training_job_id:
+                return lora
+
+            # 正常情况下只在 TRAINING/UPLOADING 状态查询
+            # 但如果 force_check=True，也允许在 FAILED 状态下重新查询（可能是连接断开导致的假失败）
+            should_query = lora.status in [LoRATrainingStatus.TRAINING, LoRATrainingStatus.UPLOADING, LoRATrainingStatus.PENDING]
+            if force_check and lora.status == LoRATrainingStatus.FAILED:
+                should_query = True
+
+            if not should_query:
                 return lora
 
             # 查询训练状态
@@ -307,12 +320,22 @@ class LoRAManager:
             if job.status == "completed":
                 lora.status = LoRATrainingStatus.READY
                 lora.lora_url = job.lora_url
+                lora.error_message = None  # 清除之前的错误信息
                 logger.info(f"LoRA training completed: {lora.lora_url}")
 
             elif job.status == "failed":
                 lora.status = LoRATrainingStatus.FAILED
                 lora.error_message = job.error_message
                 logger.error(f"LoRA training failed: {job.error_message}")
+
+            elif job.status == "running":
+                lora.status = LoRATrainingStatus.TRAINING
+                lora.error_message = None  # 清除之前的错误信息（可能是假失败）
+                logger.info(f"LoRA training in progress: {job.progress * 100:.1f}%")
+
+            elif job.status == "pending":
+                lora.status = LoRATrainingStatus.PENDING
+                lora.error_message = None
 
             db.add(lora)
             db.commit()

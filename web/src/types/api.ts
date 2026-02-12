@@ -235,6 +235,7 @@ export interface BatchGenerateVariantRequest {
   }>
   style_preset?: string
   negative_prompt?: string
+  image_provider?: ImageProvider
 }
 
 export interface SetAnchorImageRequest {
@@ -252,6 +253,42 @@ export interface GenerateReferenceRequest {
   negative_prompt?: string
   seed?: number
   num_candidates?: number
+  image_provider?: 'google' | 'aliyun'
+}
+
+// Available image providers
+export type ImageProvider = 'google' | 'aliyun'
+
+export const IMAGE_PROVIDERS: { value: ImageProvider; label: string; description: string }[] = [
+  { value: 'google', label: 'Google Imagen', description: '国际模型，质量高，需要代理' },
+  { value: 'aliyun', label: '阿里云万相', description: '国内模型，速度快，无需代理' },
+]
+
+// Async image generation job response
+export interface GenerateReferenceJobResponse {
+  job_id: string
+  character_id: string
+  status: JobStatus
+  message: string
+}
+
+// WebSocket message for image generation progress
+export interface ImageGenerationProgress {
+  type: 'job_update'
+  job_id: string
+  project_id: string
+  status: JobStatus
+  progress: number
+  message?: string
+  current_image?: number
+  total_images?: number
+  image_generated?: CharacterImage
+  result?: {
+    generated_count: number
+    failed_count: number
+    images: CharacterImage[]
+  }
+  error_message?: string
 }
 
 export interface VoiceConfig {
@@ -660,6 +697,14 @@ export interface LoRAStartTrainingRequest {
   num_dataset_images?: number
   training_steps?: number
   provider?: 'fal' | 'replicate'
+}
+
+export interface LoRAStartTrainingJobResponse {
+  job_id: string
+  lora_id: string
+  character_id: string
+  status: string
+  message: string
 }
 
 export interface CharacterLoRA {

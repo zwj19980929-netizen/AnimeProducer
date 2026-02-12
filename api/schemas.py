@@ -160,6 +160,10 @@ class GenerateReferenceRequest(BaseModel):
         le=8,
         description="生成候选图片数量"
     )
+    image_provider: str | None = Field(
+        default=None,
+        description="图片生成 Provider，可选 'google', 'aliyun'。不指定则使用默认配置"
+    )
 
 
 class GenerateVariantRequest(BaseModel):
@@ -182,6 +186,10 @@ class BatchGenerateVariantRequest(BaseModel):
     )
     style_preset: str | None = Field(default=None, description="统一的风格预设")
     negative_prompt: str | None = Field(default=None, description="统一的负面提示词")
+    image_provider: str | None = Field(
+        default=None,
+        description="图片生成 Provider，可选 'google', 'aliyun'。不指定则使用默认配置"
+    )
 
 
 class CharacterImageResponse(BaseModel):
@@ -189,10 +197,10 @@ class CharacterImageResponse(BaseModel):
     id: str
     character_id: str
     image_type: str
-    image_path: str
+    image_path: str | None = None
     image_url: str | None = None
     thumbnail_url: str | None = None
-    prompt: str
+    prompt: str | None = None
     pose: str | None = None
     expression: str | None = None
     angle: str | None = None
@@ -597,4 +605,18 @@ class EpisodeListResponse(BaseModel):
     """Response schema for listing episodes."""
     items: list[EpisodeResponse]
     total: int
+
+
+# ============================================================================
+# Character Image Generation Job Schemas
+# ============================================================================
+
+
+class GenerateReferenceJobResponse(BaseModel):
+    """Response schema for async character image generation job."""
+    job_id: str
+    character_id: str
+    status: JobStatus
+    message: str
+
 

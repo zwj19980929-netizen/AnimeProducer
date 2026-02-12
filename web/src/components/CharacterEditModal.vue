@@ -95,38 +95,55 @@
               <span class="text-gray-400">状态:</span>
               <n-tag v-if="!activeLora" type="default" size="small">未训练</n-tag>
               <n-tag v-else-if="activeLora.status === 'READY'" type="success" size="small">已就绪</n-tag>
-              <n-tag v-else-if="activeLora.status === 'TRAINING'" type="warning" size="small">训练中</n-tag>
+              <n-tag v-else-if="activeLora.status === 'TRAINING' || activeLora.status === 'PENDING' || activeLora.status === 'GENERATING_DATASET' || activeLora.status === 'UPLOADING'" type="warning" size="small">
+                {{ getLoraStatusText(activeLora.status) }}
+              </n-tag>
               <n-tag v-else-if="activeLora.status === 'FAILED'" type="error" size="small">失败</n-tag>
               <n-tag v-else type="info" size="small">{{ activeLora.status }}</n-tag>
             </div>
-            <n-button
-              v-if="!activeLora || activeLora.status === 'FAILED'"
-              size="small"
-              type="primary"
-              :disabled="trainingImageCount < 10"
-              @click="showLoraConfig = true"
-            >
-              开始训练
-            </n-button>
-            <n-button
-              v-else-if="activeLora.status === 'TRAINING'"
-              size="small"
-              type="error"
-              :loading="cancellingLora"
-              @click="handleCancelLora"
-            >
-              取消训练
-            </n-button>
+            <div class="flex gap-2">
+              <!-- 刷新状态按钮 - 用于恢复断开的连接 -->
+              <n-button
+                v-if="activeLora && (activeLora.status === 'TRAINING' || activeLora.status === 'FAILED')"
+                size="small"
+                :loading="refreshingLoraStatus"
+                @click="handleRefreshLoraStatus"
+                title="从云端刷新训练状态"
+              >
+                刷新状态
+              </n-button>
+              <!-- 开始/重新训练按钮 -->
+              <n-button
+                v-if="!activeLora || activeLora.status === 'FAILED' || activeLora.status === 'READY'"
+                size="small"
+                type="primary"
+                :disabled="trainingImageCount < 10"
+                @click="showLoraConfig = true"
+              >
+                {{ activeLora?.status === 'FAILED' ? '重新训练' : (activeLora?.status === 'READY' ? '重新训练' : '开始训练') }}
+              </n-button>
+              <!-- 取消训练按钮 -->
+              <n-button
+                v-if="activeLora && (activeLora.status === 'TRAINING' || activeLora.status === 'PENDING' || activeLora.status === 'GENERATING_DATASET' || activeLora.status === 'UPLOADING')"
+                size="small"
+                type="error"
+                :loading="cancellingLora"
+                @click="handleCancelLora"
+              >
+                取消训练
+              </n-button>
+            </div>
           </div>
 
           <!-- 训练进度 -->
-          <div v-if="activeLora && activeLora.status === 'TRAINING'" class="space-y-2">
+          <div v-if="activeLora && (activeLora.status === 'TRAINING' || activeLora.status === 'GENERATING_DATASET' || activeLora.status === 'UPLOADING' || activeLora.status === 'PENDING')" class="space-y-2">
             <n-progress
               type="line"
               :percentage="activeLora.progress * 100"
               :show-indicator="true"
               status="info"
             />
+            <p class="text-gray-400 text-sm">{{ loraProgressMessage || '准备中...' }}</p>
             <p class="text-gray-500 text-xs">
               触发词: {{ activeLora.trigger_word }} | 提供商: {{ activeLora.training_provider }}
             </p>
@@ -311,12 +328,15 @@ const activeLora = ref<CharacterLoRA | null>(null)
 const showLoraConfig = ref(false)
 const startingLora = ref(false)
 const cancellingLora = ref(false)
+const refreshingLoraStatus = ref(false)
 const trainingImageCount = ref(0)
 const loraConfig = ref({
   num_dataset_images: 20,
   training_steps: 1000,
   provider: 'fal' as 'fal' | 'replicate'
 })
+const loraJobId = ref<string | null>(null)
+const loraProgressMessage = ref('')
 let loraPollingTimer: ReturnType<typeof setInterval> | null = null
 
 const galleryRef = ref<InstanceType<typeof CharacterImageGallery> | null>(null)
@@ -475,10 +495,22 @@ watch(() => [props.show, props.character], ([show, character]) => {
 async function loadActiveLora() {
   if (!props.character) return
   try {
-    const lora = await apiClient.getActiveLoRA(props.character.character_id)
-    activeLora.value = lora
-    if (lora && (lora.status === 'TRAINING' || lora.status === 'GENERATING_DATASET' || lora.status === 'UPLOADING')) {
+    // 先获取所有 LoRA，找到正在训练的
+    const loras = await apiClient.listCharacterLoRAs(props.character.character_id)
+    const trainingLora = loras.find(l =>
+      l.status === 'TRAINING' ||
+      l.status === 'GENERATING_DATASET' ||
+      l.status === 'UPLOADING' ||
+      l.status === 'PENDING'
+    )
+
+    if (trainingLora) {
+      activeLora.value = trainingLora
       startLoraPolling()
+    } else {
+      // 获取已就绪的 LoRA
+      const lora = await apiClient.getActiveLoRA(props.character.character_id)
+      activeLora.value = lora
     }
   } catch (error) {
     console.error('Failed to load LoRA:', error)
@@ -487,26 +519,84 @@ async function loadActiveLora() {
 
 function startLoraPolling() {
   if (loraPollingTimer) return
-  loraPollingTimer = setInterval(async () => {
-    if (!activeLora.value) {
-      stopLoraPolling()
-      return
-    }
-    try {
+
+  // 立即查询一次
+  pollLoraStatus()
+
+  loraPollingTimer = setInterval(pollLoraStatus, 3000)
+}
+
+async function pollLoraStatus() {
+  if (!activeLora.value) {
+    stopLoraPolling()
+    return
+  }
+
+  try {
+    // 如果有 job_id，通过 Job API 获取进度
+    if (loraJobId.value) {
+      const job = await apiClient.getJob(loraJobId.value)
+      activeLora.value = {
+        ...activeLora.value,
+        progress: job.progress,
+        status: mapJobStatusToLoraStatus(job.status) as any,
+        error_message: job.error_message || undefined,
+        lora_url: (job.result as any)?.lora_url || activeLora.value.lora_url,
+      }
+
+      // 从 job result 获取消息
+      const result = job.result as any
+      if (result?.message) {
+        loraProgressMessage.value = result.message
+      } else if (job.status === 'STARTED') {
+        const pct = Math.round(job.progress * 100)
+        loraProgressMessage.value = `训练中... ${pct}%`
+      }
+
+      if (job.status === 'SUCCESS') {
+        stopLoraPolling()
+        loraProgressMessage.value = 'LoRA 训练完成！'
+        message.success('LoRA 训练完成！')
+        // 重新加载 LoRA 信息
+        await loadActiveLora()
+      } else if (job.status === 'FAILURE') {
+        stopLoraPolling()
+        loraProgressMessage.value = job.error_message || '训练失败'
+        message.error(`LoRA 训练失败: ${job.error_message || '未知错误'}`)
+      } else if (job.status === 'REVOKED') {
+        stopLoraPolling()
+        loraProgressMessage.value = '训练已取消'
+        message.info('训练已取消')
+      }
+    } else {
+      // 没有 job_id，通过 LoRA status API 获取
       const status = await apiClient.getLoRAStatus(activeLora.value.id)
       activeLora.value = { ...activeLora.value, ...status }
-      if (status.status === 'READY' || status.status === 'FAILED') {
+
+      if (status.status === 'READY') {
         stopLoraPolling()
-        if (status.status === 'READY') {
-          message.success('LoRA 训练完成！')
-        } else if (status.status === 'FAILED') {
-          message.error(`LoRA 训练失败: ${status.error_message || '未知错误'}`)
-        }
+        loraProgressMessage.value = 'LoRA 训练完成！'
+        message.success('LoRA 训练完成！')
+      } else if (status.status === 'FAILED') {
+        stopLoraPolling()
+        loraProgressMessage.value = status.error_message || '训练失败'
+        message.error(`LoRA 训练失败: ${status.error_message || '未知错误'}`)
       }
-    } catch (error) {
-      console.error('Failed to poll LoRA status:', error)
     }
-  }, 5000)
+  } catch (error) {
+    console.error('Failed to poll LoRA status:', error)
+  }
+}
+
+function mapJobStatusToLoraStatus(jobStatus: string): string {
+  switch (jobStatus) {
+    case 'PENDING': return 'PENDING'
+    case 'STARTED': return 'TRAINING'
+    case 'SUCCESS': return 'READY'
+    case 'FAILURE': return 'FAILED'
+    case 'REVOKED': return 'FAILED'
+    default: return 'PENDING'
+  }
 }
 
 function stopLoraPolling() {
@@ -516,20 +606,86 @@ function stopLoraPolling() {
   }
 }
 
+function getLoraStatusText(status: string): string {
+  switch (status) {
+    case 'PENDING': return '等待中'
+    case 'GENERATING_DATASET': return '生成数据集'
+    case 'DATASET_READY': return '数据集就绪'
+    case 'UPLOADING': return '上传中'
+    case 'TRAINING': return '训练中'
+    case 'READY': return '已就绪'
+    case 'FAILED': return '失败'
+    default: return status
+  }
+}
+
+async function handleRefreshLoraStatus() {
+  if (!activeLora.value) return
+  refreshingLoraStatus.value = true
+
+  try {
+    // 通过 LoRA status API 从云端刷新状态
+    const status = await apiClient.getLoRAStatus(activeLora.value.id)
+    activeLora.value = { ...activeLora.value, ...status }
+
+    if (status.status === 'READY') {
+      loraProgressMessage.value = 'LoRA 训练完成！'
+      message.success('LoRA 训练已完成！')
+      stopLoraPolling()
+    } else if (status.status === 'FAILED') {
+      loraProgressMessage.value = status.error_message || '训练失败'
+      message.warning(`训练状态: 失败 - ${status.error_message || '未知错误'}`)
+      stopLoraPolling()
+    } else if (status.status === 'TRAINING') {
+      const pct = Math.round(status.progress * 100)
+      loraProgressMessage.value = `训练中... ${pct}%`
+      message.info(`训练仍在进行中 (${pct}%)，已恢复状态轮询`)
+      // 恢复轮询
+      startLoraPolling()
+    } else {
+      message.info(`当前状态: ${getLoraStatusText(status.status)}`)
+    }
+  } catch (error) {
+    console.error('Failed to refresh LoRA status:', error)
+    message.error(`刷新状态失败: ${error instanceof Error ? error.message : '未知错误'}`)
+  } finally {
+    refreshingLoraStatus.value = false
+  }
+}
+
 async function handleStartLora() {
   if (!props.character) return
   startingLora.value = true
   try {
-    const lora = await apiClient.startLoRATraining({
+    const response = await apiClient.startLoRATraining({
       character_id: props.character.character_id,
       use_selected_images: true,
       num_dataset_images: loraConfig.value.num_dataset_images,
       training_steps: loraConfig.value.training_steps,
       provider: loraConfig.value.provider
     })
-    activeLora.value = lora
+
+    // 保存 job_id 用于轮询
+    loraJobId.value = response.job_id
+    loraProgressMessage.value = response.message
+
+    // 创建临时的 activeLora 对象
+    activeLora.value = {
+      id: response.lora_id,
+      character_id: response.character_id,
+      trigger_word: '',
+      status: 'PENDING' as any,
+      progress: 0,
+      lora_url: undefined,
+      dataset_size: loraConfig.value.num_dataset_images,
+      training_provider: loraConfig.value.provider,
+      error_message: undefined,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+
     showLoraConfig.value = false
-    message.success('LoRA 训练已启动')
+    message.success('LoRA 训练任务已创建')
     startLoraPolling()
   } catch (error) {
     console.error('Failed to start LoRA training:', error)
@@ -543,9 +699,15 @@ async function handleCancelLora() {
   if (!activeLora.value) return
   cancellingLora.value = true
   try {
-    await apiClient.cancelLoRATraining(activeLora.value.id)
+    // 如果有 job_id，取消 job
+    if (loraJobId.value) {
+      await apiClient.cancelJob(loraJobId.value)
+    } else {
+      await apiClient.cancelLoRATraining(activeLora.value.id)
+    }
     stopLoraPolling()
     activeLora.value = { ...activeLora.value, status: 'FAILED' as any, error_message: '用户取消' }
+    loraProgressMessage.value = '训练已取消'
     message.success('训练已取消')
   } catch (error) {
     console.error('Failed to cancel LoRA training:', error)

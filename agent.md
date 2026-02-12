@@ -1,160 +1,175 @@
+# 🚀 Phase 2 升级方案：构建智能导演 Agent (Smart Director Upgrade)
 
-# 🚀 AnimeMatrix 进化路线图：构建“世界级”动漫生成 Agent
+## 1. 核心愿景 (Core Vision)
 
-## 0. 核心愿景 (Core Vision)
+**从“自动化流水线”进化为“闭环智能系统”。**
 
-从线性的“文生图生视频”脚本，进化为具备**多模态融合、导演思维、3D 空间感知**的智能 Agent。
-**核心转变：**
+* **当前状态 (Phase 1 - Automation):**
+    * 流程：剧本 -> 视频 -> 音频 -> 输出。
+    * 特点：**线性执行**。系统“盲目”地完成任务，无法感知生成质量。如果 AI 画崩了（如多指、穿模），错误会被保留。
+    * 局限：缺乏对上一个镜头的“记忆”，导致同一场景下光影、位置不连贯。
 
-* **资产管理：** 从“参考图 (Reference Image)” 进化为 **“动态 LoRA 模型 (Dynamic LoRA)”**。
-* **分镜生成：** 从“随机抽卡” 进化为 **“3D 空间约束 (3D-Guided)”**。
-* **质量控制：** 从“开盲盒” 进化为 **“闭环反馈 (Critic Loop)”**。
+* **目标状态 (Phase 2 - Intelligence):**
+    * 流程：剧本 -> 视频 -> **AI 观看并评分** -> **(不合格? 重画) / (合格? 继续)** -> 音频 -> 输出。
+    * 特点：**闭环反馈** + **上下文记忆**。系统拥有“自我反思”能力和“场景连续性”控制。
 
 ---
 
-## 1. 核心架构图 (System Architecture)
+## 2. 模块一：AI 影评人 (The AI Critic Loop)
 
-```mermaid
-graph TD
-    User[用户: 小说/草图] --> DirectorAgent[导演 Agent]
-    
-    subgraph "Pre-Production (资产准备)"
-        DirectorAgent --> ConceptArt[概念设计]
-        ConceptArt -->|生成20+张素材| LoRATrainer[动态 LoRA 训练]
-        DirectorAgent --> LayoutEngine[3D 简易布局]
-    end
-    
-    subgraph "Production (视觉生成)"
-        LayoutEngine -->|Depth/OpenPose| ControlNet[ControlNet 约束]
-        LoRATrainer -->|加载模型| ImageGen[角色一致性生成]
-        ImageGen -->|上一帧参考| ContextI2I[上下文视频生成]
-        ContextI2I --> Critic[VLM 影评人]
-        Critic --"不合格 (Re-roll)"--> ImageGen
-        Critic --"合格"--> LipSync[口型同步]
-    end
-    
-    subgraph "Post-Production (音频与合成)"
-        DirectorAgent --> AudioAgent[音频 Agent]
-        AudioAgent --> FoleyGen[AI 拟音 (SFX)]
-        AudioAgent --> MusicGen[AI 配乐 (BGM)]
-        AudioAgent --> EmotionalTTS[情感配音]
-        LipSync & FoleyGen & MusicGen & EmotionalTTS --> AutoEditor[智能剪辑台]
-    end
-    
-    AutoEditor --> Final[世界级动漫成品]
+**目标：** 引入一个 VLM (Vision Language Model) 扮演“质检员”，在合成音频前拦截低质量画面。
 
+### 2.1 工作流程 (Workflow)
+
+1.  **初次生成：** `Pipeline` 生成视频文件 `v1.mp4`。
+2.  **VLM 介入：** 调用视觉大模型（Gemini 1.5 Pro / GPT-4o）观看该视频。
+3.  **结构化评分：** 要求 VLM 返回 JSON 格式评价：
+    * `score` (0-10分)
+    * `issues` (问题列表：如 "hand distortion", "flickering")
+    * `suggestion` (修正建议：如 "hide hands", "reduce motion")
+4.  **决策逻辑：**
+    * **Score >= 8:** 通过，进入 Lip-Sync 环节。
+    * **Score < 8:** 驳回。将 `suggestion` 添加到原来的 Prompt 中，触发 **Re-roll (重绘)**。
+    * *熔断机制：* 最多重试 3 次，防止死循环。
+
+### 2.2 核心代码设计 (Core Design)
+
+建议新建文件 `core/critic.py`:
+
+```python
+import json
+from typing import Dict, Any
+# from integrations.vlm_client import vlm_client  # 假设你已有 VLM 客户端
+
+class VideoCritic:
+    def evaluate_shot(self, video_path: str, original_prompt: str) -> Dict[str, Any]:
+        """
+        让 VLM 扮演导演，逐帧审查视频质量
+        """
+        system_prompt = """
+        You are a top-tier anime director. Critical Review Mode.
+        Analyze the video for specific visual glitches:
+        1. Anatomy errors (extra fingers, twisted limbs).
+        2. Temporal flickering (inconsistent background).
+        3. Prompt adherence (does it match the script?).
+        
+        Return ONLY a JSON object:
+        {
+            "score": <int 0-10>,
+            "has_glitches": <bool>,
+            "feedback": "<short, actionable fix for the prompt>"
+        }
+        """
+        
+        # 调用 VLM (Gemini 1.5 Pro 视频理解能力极强)
+        # response = vlm_client.analyze_video(video_path, prompt=system_prompt)
+        
+        # 模拟返回
+        # return json.loads(response)
+        pass
+
+# 实例化单例
+video_critic = VideoCritic()
 ```
 
----
+### 2.3 集成逻辑 (tasks/shots.py)
+在 render_shot 函数中修改：
+```python
+# ... (视频生成后，LipSync 前) ...
+    
+    current_video = artifact.video_path
+    retry_count = 0
+    max_retries = 2
+    
+    while retry_count <= max_retries:
+        # 1. 评分
+        review = video_critic.evaluate_shot(current_video, shot.visual_prompt)
+        logger.info(f"Critic Score: {review['score']} - {review['feedback']}")
+        
+        if review['score'] >= 8:
+            break # 质量达标
+            
+        # 2. 质量不达标，准备重绘
+        retry_count += 1
+        logger.warning(f"Quality check failed. Retrying ({retry_count}/{max_retries})...")
+        
+        # 3. 动态修正 Prompt
+        # new_prompt = f"{shot.visual_prompt}, {review['feedback']}"
+        # artifact = pipeline.process_shot(..., visual_prompt=new_prompt)
+        # current_video = artifact.video_path
+```
 
-## 2. 功能模块详解 (Feature Breakdown)
+## 3. 模块二：空间连贯性引擎 (Context-Aware Consistency)
+目标： 解决“角色瞬移”和“光影突变”问题，让连续的镜头看起来像是在同一个物理空间拍摄的。
 
-### 🟢 第一阶段：视觉极限 (Visual Consistency)
+3.1 技术原理
+利用 Image-to-Video (I2V) 的特性，将 上一镜头 (Shot N-1) 的最后一帧，作为 当前镜头 (Shot N) 的首帧参考 (First Frame Condition) 或 风格参考 (Style Reference)。
 
-**目标：** 解决角色在复杂动作下的崩坏问题，实现工业级一致性。
+3.2 实现策略
+场景分组 (Scene Grouping):
 
-#### 1.1 动态 LoRA 训练流水线 (On-the-fly LoRA Training) [P0 优先级]
+在解析剧本时，将属于同一场戏的镜头标记为同一 scene_id。
 
-* **痛点：** 仅靠 IP-Adapter 在大动作或特殊角度下失效。
-* **方案：** **“资产即模型” (Asset-as-Model)**。
-1. **自动扩充：** 用户选定 1 张始祖图 -> Agent 自动生成 20 张不同角度/表情的素材。
-2. **云端微调：** 调用 API (Fal.ai/Replicate) 训练 Flux/SDXL LoRA。
-3. **推理加载：** 生成正片时加载该 LoRA，权重设为 0.8-1.0。
+上下文传递 (Context Passing):
 
+渲染 Shot N 时，查询数据库寻找 scene_id 相同且 order == N-1 的镜头。
 
-* **技术栈：** `AssetManager`, `Fal-Client`, `ZipFile`
+如果 Shot N-1 状态为 COMPLETED，读取其视频文件的最后一帧。
 
-#### 1.2 3D 辅助分镜布局 (3D-Guided Layout)
+条件注入 (Injection):
 
-* **痛点：** 透视错误，人物与背景比例失调。
-* **方案：** **3D 代理层**。
-1. LLM 输出简易坐标 (e.g., `{"ActorA": [0, 0, 1], "Camera": "high-angle"}`)。
-2. 系统渲染简单的灰度深度图 (Depth Map) 或骨架图。
-3. 输入 ControlNet 指导图像生成。
+调用视频生成 API 时，传入这张截图。
 
+关键点： 设置 image_strength (或类似参数) 为 0.3 - 0.4。
 
-* **技术栈：** `Blender Python API` / `Three.js` (前端), `ControlNet`
+解释： 我们不需要 Shot N 的第一帧跟 Shot N-1 的最后一帧完全重合（那样就变成定格动画了），我们需要它继承构图、色调和站位。
 
----
+### 3.3 代码修改建议 (tasks/shots.py)
+```Python
+def get_previous_shot_last_frame(current_shot: Shot, session: Session) -> Optional[str]:
+    """获取同一场景下，前一个镜头的最后一帧路径"""
+    prev_shot = session.query(Shot).filter(
+        Shot.project_id == current_shot.project_id,
+        Shot.scene_id == current_shot.scene_id, # 需确保数据库有此字段
+        Shot.order == current_shot.order - 1
+    ).first()
+    
+    if prev_shot and prev_shot.video_path:
+        # 使用 ffmpeg 提取最后一帧
+        # frame_path = extract_frame(prev_shot.video_path, time=-1)
+        # return frame_path
+        pass
+    return None
 
-### 🟡 第二阶段：导演思维 (Director Mindset)
+# 在 render_shot 中使用:
+# context_image = get_previous_shot_last_frame(shot, session)
+# artifact = pipeline.process_shot(..., first_frame_image=context_image, image_strength=0.3)
+```
+## 4. 实施路线图 (Implementation Roadmap)
+为了保证系统稳定性，建议按以下阶段开发：
 
-**目标：** 让视频具备叙事连贯性和节奏感。
+🟢 阶段 1: 基础设施 (Week 1)
+[ ] 编写 core/critic.py，打通 Gemini/GPT-4o 的视频分析接口。
 
-#### 2.1 上下文感知的 I2I 链 (Context-Aware I2I)
+[ ] 编写 tests/test_critic.py，手动上传几个好/坏视频，测试 AI 评分的准确性。
 
-* **痛点：** 镜头之间物体丢失（如镜头A拿杯子，镜头B杯子消失）。
-* **方案：** **显存机制 (Short-term Memory)**。
-1. 生成 Shot N 时，强制读取 Shot N-1 的**最后一帧**。
-2. 将该帧作为 Image Prompt (低权重) 或 I2I 底图。
-3. **物体恒定 Agent：** 扫描剧本关键道具，强制注入 Prompt。
+[ ] 在 Shot 表中添加 scene_id 字段（如果还没有），优化 ScriptParser 以识别场景边界（通常通过 "EXT." / "INT." 关键词）。
 
+🟡 阶段 2: 影评人上线 (Week 2)
+[ ] 修改 tasks/shots.py，接入 VideoCritic。
 
+[ ] 初期策略： 只记录评分日志 (Log Mode)，不触发重绘。观察 50 个镜头的评分分布，校准 Prompt。
 
-#### 2.2 节奏控制器 (Pacing Engine)
+[ ] 后期策略： 开启自动重绘 (Active Mode)。
 
-* **痛点：** 视频匀速播放，缺乏张力。
-* **方案：** **情绪曲线驱动**。
-1. 计算文本 `Tension Score` (0-10)。
-2. **高张力：** 生成短时长、高动态 (`Motion Score` high) 的镜头。
-3. **低张力：** 生成长镜头、面部特写。
-4. 合成时结合 Beat Detection 进行卡点剪辑。
+🔵 阶段 3: 连贯性增强 (Week 3)
+[ ] 实现 extract_last_frame 工具函数。
 
+[ ] 修改 render_shot 逻辑，支持读取上一镜头缓存。
 
+[ ] 注意： 这可能会降低并行渲染的速度（因为 Shot 2 必须等 Shot 1 渲染完）。建议实现**“混合调度”**：不同场景并行，同一场景串行。
 
----
+## 5. 总结 (Summary)
+通过引入 Critic Loop，你的 Agent 学会了**“审美”； 通过引入 Context Consistency，你的 Agent 学会了“场面调度”**。
 
-### 🔵 第三阶段：听觉沉浸 (Auditory Immersion)
-
-**目标：** 营造电影级氛围。
-
-#### 3.1 AI 拟音师 (Generative SFX)
-
-* **痛点：** 环境“死寂”，只有人声。
-* **方案：** **AudioLDM 集成**。
-1. 解析分镜中的环境描述 (e.g., "rain", "footsteps").
-2. 并行生成音效素材 (`.wav`)。
-3. 合成时自动混音 (Mixing)。
-
-
-
-#### 3.2 情感化语音克隆 (Guide Audio Mode)
-
-* **痛点：** TTS 缺乏戏感。
-* **方案：** **RVC 变声 / GPT-4o Audio**。
-1. 支持用户上传“草稿配音”（只取语调）。
-2. 使用 RVC 转换为角色音色。
-3. 实现口型同步 (Lip-Sync) 消除违和感。
-
-
-
----
-
-### 🟣 第四阶段：交互进化 (Interactive Control)
-
-**目标：** 人类与 AI 协作 (Human-in-the-loop)。
-
-#### 4.1 交互式画板 (Scribble-to-Video)
-
-* **方案：** 前端集成 Canvas，用户绘制简易线条 -> 后端 ControlNet Scribble 生成视频。
-
-#### 4.2 "影评人" 循环 (The Critic Loop)
-
-* **痛点：** 废片直接进入成品。
-* **方案：** **VLM 自我反思**。
-1. `VideoGen` -> 输出视频。
-2. `VLM (Critic)` -> 评分并给出修改意见 (e.g., "Too many fingers").
-3. 如果分数 < 8 -> 自动重绘 (Re-roll)。
-
-
-
----
-
-## 3. 当前开发优先级 (Action Plan)
-
-为确保项目快速落地并具备核心竞争力，建议按照以下顺序执行：
-
-1. **[High] LoRA 训练流水线：** 这是“世界级”效果的基础。优先实现 `AssetManager` 的数据集生成和 `TrainerClient` 的云端对接。
-2. **[High] 口型同步 (Lip-Sync)：** 解决最直观的“哑巴说话”问题。
-3. **[Medium] API 整合与限流优化：** 确保大规模生成时的稳定性。
-4. **[Medium] AI 拟音 (SFX)：** 低成本大幅提升观感。
+这两步走完，你的 AnimeMatrix 将不再是一个简单的生成脚本，而是一个具备初级导演思维的 AI 创作者。

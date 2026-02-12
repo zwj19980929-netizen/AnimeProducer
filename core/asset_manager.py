@@ -18,7 +18,7 @@ from sqlmodel import Session, select
 from config import settings
 from core.database import engine
 from core.models import Character, CharacterState
-from integrations.gen_client import gen_client
+from integrations.provider_factory import ProviderFactory
 from integrations.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
@@ -999,8 +999,9 @@ Return ONLY the valid JSON object."""
                 "timestamp": datetime.now().isoformat()
             }
             try:
-                # 调用绘图接口，传入所有参数
-                image_bytes = gen_client.generate_image(
+                # 调用绘图接口，传入所有参数（使用 ProviderFactory 获取配置的图像客户端）
+                image_client = ProviderFactory.get_image_client()
+                image_bytes = image_client.generate_image(
                     full_prompt,
                     reference_image_path=reference_image,
                     style_preset=style_preset,

@@ -98,17 +98,19 @@ class GenClient:
                 "safety_filter_level": "BLOCK_LOW_AND_ABOVE",
             }
 
-            # Google Imagen 4.0 支持 negative_prompt
+            # Google Imagen API 不支持 negative_prompt 参数
+            # 将 negative_prompt 融入主 prompt 中
+            final_prompt = enhanced_prompt
             if negative_prompt:
-                config_params["negative_prompt"] = negative_prompt
+                final_prompt = f"{enhanced_prompt}. Avoid: {negative_prompt}"
+                logger.debug(f"Negative prompt merged into main prompt")
 
-            # Google Imagen 支持 seed 参数
-            if seed is not None:
-                config_params["seed"] = seed
+            # 注意：Google Imagen API 不支持 seed 参数
+            # seed 参数仅用于日志记录，不传递给 API
 
             response = self.client.models.generate_images(
                 model=self.model_name,
-                prompt=enhanced_prompt,
+                prompt=final_prompt,
                 config=types.GenerateImagesConfig(**config_params)
             )
 

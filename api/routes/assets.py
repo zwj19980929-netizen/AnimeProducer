@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, UploadFile, File, Form
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlmodel import func, select
@@ -27,8 +27,10 @@ from api.schemas import (
     VoicePreviewRequest,
     VoicePreviewResponse,
     AvailableVoicesResponse,
+    GenerateReferenceJobResponse,
+    JobResponse,
 )
-from core.models import Character, CharacterImage, CharacterImageType, Project
+from core.models import Character, CharacterImage, CharacterImageType, Project, Job, JobType, JobStatus
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -193,25 +195,28 @@ def delete_character(
 
 @router.post(
     "/characters/{character_id}/generate-reference",
-    response_model=CharacterImageListResponse,
+    response_model=GenerateReferenceJobResponse,
     responses={404: {"model": ErrorResponse}},
 )
 def generate_character_reference(
     character_id: str,
     session: DBSession,
-    asset_service: AssetDep,
     request: GenerateReferenceRequest = None,
-) -> CharacterImageListResponse:
-    """Generate reference images for a character using AI.
+) -> GenerateReferenceJobResponse:
+    """Generate reference images for a character using AI (async).
 
     使用角色的 appearance_prompt 生成候选参考图，存入图片库。
-    用户可以从中选择一张作为锚定图。
+    此端点立即返回 Job ID，图片生成在后台异��进行。
+    通过 WebSocket 订阅 job 更新可获取实时进度。
 
     Args:
         character_id: The character ID
         request: Optional request body with custom_prompt, style_preset, num_candidates
+
+    Returns:
+        Job ID and initial status
     """
-    logger.info(f"Generating reference for character: {character_id}")
+    logger.info(f"Starting async reference generation for character: {character_id}")
 
     character = session.get(Character, character_id)
     if not character:
@@ -224,77 +229,105 @@ def generate_character_reference(
     if request is None:
         request = GenerateReferenceRequest()
 
-    custom_prompt = request.custom_prompt
-    style_preset = request.style_preset or "anime style"
-    num_candidates = request.num_candidates
-    negative_prompt = request.negative_prompt
-    seed = request.seed
+    # 获取 project_id（用于 Job 关联）
+    project_id = character.project_id
+    if not project_id:
+        # 如果角色没有关联项目，尝试从 character_id 解析
+        project_id = character_id.split("_")[0] if "_" in character_id else "default"
 
-    # 构建完整的 prompt（使用 appearance_prompt）
-    base_prompt = character.appearance_prompt or character.prompt_base or character.name
-    if custom_prompt:
-        full_prompt = f"{base_prompt}, {custom_prompt}"
-    else:
-        full_prompt = base_prompt
+    # 创建 Job 记录
+    job = Job(
+        project_id=project_id,
+        job_type=JobType.ASSET_GENERATION,
+        status=JobStatus.PENDING,
+        progress=0.0,
+        result={
+            "character_id": character_id,
+            "num_candidates": request.num_candidates,
+            "image_provider": request.image_provider,
+        }
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
 
-    try:
-        # 生成参考图候选
-        candidates = asset_service.manager.generate_reference_images(
-            character=character,
-            style_spec=style_preset,
-            n=num_candidates,
-            project_id=character.project_id,
-            style_preset=style_preset,
-            negative_prompt=negative_prompt,
-            seed=seed,
-            prompt_override=full_prompt  # 使用完整 prompt
-        )
+    # 触发 Celery 任务
+    from tasks.assets import generate_character_images_task
 
-        if not candidates:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to generate reference images",
-            )
+    celery_task = generate_character_images_task.delay(
+        job_id=job.id,
+        character_id=character_id,
+        project_id=project_id,
+        num_candidates=request.num_candidates,
+        style_preset=request.style_preset or "anime style",
+        custom_prompt=request.custom_prompt,
+        negative_prompt=request.negative_prompt,
+        seed=request.seed,
+        image_provider=request.image_provider,
+    )
 
-        # 将候选图存入图片库
-        created_images = []
-        for candidate in candidates:
-            image = CharacterImage(
-                character_id=character_id,
-                image_type=CharacterImageType.CANDIDATE,
-                image_path=candidate.local_path,
-                image_url=candidate.oss_url,
-                prompt=full_prompt,
-                style_preset=style_preset,
-                generation_metadata={
-                    "style_spec": style_preset,
-                    "custom_prompt": custom_prompt,
-                    "negative_prompt": negative_prompt,
-                    "seed": candidate.seed,
-                }
-            )
-            session.add(image)
-            created_images.append(image)
+    # 更新 Job 的 celery_task_id
+    job.celery_task_id = celery_task.id
+    session.add(job)
+    session.commit()
 
-        session.commit()
+    provider_info = f"，使用 {request.image_provider}" if request.image_provider else ""
+    logger.info(f"Created async job {job.id} for character {character_id}, celery_task_id={celery_task.id}")
 
-        # 刷新获取 ID
-        for img in created_images:
-            session.refresh(img)
+    return GenerateReferenceJobResponse(
+        job_id=job.id,
+        character_id=character_id,
+        status=JobStatus.PENDING,
+        message=f"图片生成任务已创建，共 {request.num_candidates} 张候选图{provider_info}",
+    )
 
-        logger.info(f"Generated {len(created_images)} reference images for {character_id}")
 
-        return CharacterImageListResponse(
-            items=[CharacterImageResponse.model_validate(img) for img in created_images],
-            total=len(created_images),
-        )
+@router.get(
+    "/characters/{character_id}/generation-jobs",
+    response_model=list[JobResponse],
+    responses={404: {"model": ErrorResponse}},
+)
+def list_character_generation_jobs(
+    character_id: str,
+    session: DBSession,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> list[JobResponse]:
+    """获取角色的图片生成任务列表。
 
-    except Exception as e:
-        logger.error(f"Failed to generate reference for {character_id}: {e}")
+    Args:
+        character_id: The character ID
+        limit: Maximum number of jobs to return
+
+    Returns:
+        List of generation jobs for this character
+    """
+    character = session.get(Character, character_id)
+    if not character:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate reference image: {str(e)}",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
         )
+
+    # 查询该角色的生成任务
+    from sqlalchemy import cast, String
+    from sqlmodel import JSON
+
+    query = (
+        select(Job)
+        .where(Job.job_type == JobType.ASSET_GENERATION)
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+    )
+
+    jobs = session.exec(query).all()
+
+    # 过滤出属于该角色的任务
+    character_jobs = []
+    for job in jobs:
+        if job.result and job.result.get("character_id") == character_id:
+            character_jobs.append(JobResponse.model_validate(job))
+
+    return character_jobs
 
 
 @router.post(
@@ -694,6 +727,272 @@ def delete_character_image(
 
 
 @router.post(
+    "/characters/{character_id}/images/upload",
+    response_model=CharacterImageResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+async def upload_character_image(
+    character_id: str,
+    session: DBSession,
+    file: UploadFile = File(..., description="图片文件 (支持 jpg, png, webp)"),
+    mark_for_training: bool = Form(default=True, description="是否标记为训练图"),
+) -> CharacterImageResponse:
+    """上传自定义图片到角色图片库
+
+    上传的图片默认标记为训练图，可用于 LoRA 训练。
+    """
+    import os
+    from pathlib import Path
+    from config import settings
+    from integrations.oss_service import is_oss_configured, OSSService
+
+    logger.info(f"Uploading image for character {character_id}, mark_for_training={mark_for_training}")
+
+    # 验证角色存在
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    # 验证文件类型
+    if not file.content_type:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot determine file type",
+        )
+
+    allowed_types = ["image/jpeg", "image/png", "image/webp"]
+    if file.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {file.content_type}. Allowed: {allowed_types}",
+        )
+
+    # 读取文件内容
+    try:
+        file_content = await file.read()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read file: {str(e)}",
+        )
+
+    if len(file_content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Empty file",
+        )
+
+    # 限制文件大小 (10MB)
+    max_size = 10 * 1024 * 1024
+    if len(file_content) > max_size:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File too large. Maximum size: {max_size // 1024 // 1024}MB",
+        )
+
+    # 确定文件扩展名
+    ext_map = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    ext = ext_map.get(file.content_type, ".png")
+
+    # 生成唯一文件名
+    timestamp = int(datetime.now().timestamp() * 1000)
+    filename = f"upload_{timestamp}{ext}"
+
+    image_path = None
+    image_url = None
+
+    try:
+        # 保存图片
+        if is_oss_configured():
+            # 上传到 OSS
+            oss = OSSService.get_instance()
+            oss_filename = f"char_{character_id}_upload_{timestamp}"
+            image_url = oss.upload_image_bytes(file_content, filename=oss_filename)
+            logger.info(f"Uploaded to OSS: {image_url}")
+        else:
+            # 保存到本地
+            project_id = character.project_id or character_id.split("_")[0]
+            assets_dir = Path(settings.ASSETS_DIR)
+            character_dir = assets_dir / "projects" / project_id / "characters" / character_id
+            character_dir.mkdir(parents=True, exist_ok=True)
+
+            image_path = str(character_dir / filename)
+            with open(image_path, "wb") as f:
+                f.write(file_content)
+            logger.info(f"Saved to local: {image_path}")
+
+        # 创建数据库记录
+        image = CharacterImage(
+            character_id=character_id,
+            image_type=CharacterImageType.TRAINING if mark_for_training else CharacterImageType.CUSTOM,
+            image_path=image_path,
+            image_url=image_url,
+            prompt="user uploaded",
+            is_selected_for_training=mark_for_training,
+            generation_metadata={
+                "source": "upload",
+                "original_filename": file.filename,
+                "content_type": file.content_type,
+                "size_bytes": len(file_content),
+            }
+        )
+        session.add(image)
+        session.commit()
+        session.refresh(image)
+
+        logger.info(f"Created image record {image.id} for character {character_id}")
+        return CharacterImageResponse.model_validate(image)
+
+    except Exception as e:
+        # 清理已上传的文件
+        if image_path and os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except Exception:
+                pass
+        logger.error(f"Failed to upload image: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload image: {str(e)}",
+        )
+
+
+@router.post(
+    "/characters/{character_id}/images/upload-batch",
+    response_model=CharacterImageListResponse,
+    responses={404: {"model": ErrorResponse}, 400: {"model": ErrorResponse}},
+)
+async def upload_character_images_batch(
+    character_id: str,
+    session: DBSession,
+    files: list[UploadFile] = File(..., description="图片文件列表 (支持 jpg, png, webp)"),
+    mark_for_training: bool = Form(default=True, description="是否标记为训练图"),
+) -> CharacterImageListResponse:
+    """批量上传图片到角色图片库
+
+    一次最多上传 20 张图片，默认标记为训练图。
+    """
+    import os
+    from pathlib import Path
+    from config import settings
+    from integrations.oss_service import is_oss_configured, OSSService
+
+    logger.info(f"Batch uploading {len(files)} images for character {character_id}")
+
+    # 验证角色存在
+    character = session.get(Character, character_id)
+    if not character:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {character_id}",
+        )
+
+    # 限制批量上传数量
+    if len(files) > 20:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Maximum 20 files per batch upload",
+        )
+
+    allowed_types = ["image/jpeg", "image/png", "image/webp"]
+    ext_map = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    max_size = 10 * 1024 * 1024
+
+    use_oss = is_oss_configured()
+    oss = OSSService.get_instance() if use_oss else None
+
+    project_id = character.project_id or character_id.split("_")[0]
+    assets_dir = Path(settings.ASSETS_DIR)
+    character_dir = assets_dir / "projects" / project_id / "characters" / character_id
+
+    if not use_oss:
+        character_dir.mkdir(parents=True, exist_ok=True)
+
+    created_images = []
+    errors = []
+
+    for idx, file in enumerate(files):
+        try:
+            # 验证文件类型
+            if not file.content_type or file.content_type not in allowed_types:
+                errors.append(f"File {idx + 1}: Unsupported type {file.content_type}")
+                continue
+
+            # 读取文件
+            file_content = await file.read()
+            if len(file_content) == 0:
+                errors.append(f"File {idx + 1}: Empty file")
+                continue
+
+            if len(file_content) > max_size:
+                errors.append(f"File {idx + 1}: Too large")
+                continue
+
+            ext = ext_map.get(file.content_type, ".png")
+            timestamp = int(datetime.now().timestamp() * 1000) + idx
+            filename = f"upload_{timestamp}{ext}"
+
+            image_path = None
+            image_url = None
+
+            if use_oss and oss:
+                oss_filename = f"char_{character_id}_upload_{timestamp}"
+                image_url = oss.upload_image_bytes(file_content, filename=oss_filename)
+            else:
+                image_path = str(character_dir / filename)
+                with open(image_path, "wb") as f:
+                    f.write(file_content)
+
+            # 创建数据库记录
+            image = CharacterImage(
+                character_id=character_id,
+                image_type=CharacterImageType.TRAINING if mark_for_training else CharacterImageType.CUSTOM,
+                image_path=image_path,
+                image_url=image_url,
+                prompt="user uploaded",
+                is_selected_for_training=mark_for_training,
+                generation_metadata={
+                    "source": "upload",
+                    "original_filename": file.filename,
+                    "content_type": file.content_type,
+                    "size_bytes": len(file_content),
+                }
+            )
+            session.add(image)
+            created_images.append(image)
+
+        except Exception as e:
+            errors.append(f"File {idx + 1}: {str(e)}")
+            continue
+
+    if created_images:
+        session.commit()
+        for img in created_images:
+            session.refresh(img)
+
+    if errors:
+        logger.warning(f"Batch upload errors: {errors}")
+
+    logger.info(f"Batch uploaded {len(created_images)} images for character {character_id}")
+
+    return CharacterImageListResponse(
+        items=[CharacterImageResponse.model_validate(img) for img in created_images],
+        total=len(created_images),
+    )
+
+
+@router.post(
     "/characters/{character_id}/images/set-anchor",
     response_model=CharacterResponse,
     responses={404: {"model": ErrorResponse}},
@@ -741,7 +1040,8 @@ def set_anchor_image(
     character.anchor_image_path = image.image_path
     character.anchor_image_url = image.image_url
     # 同时更新参考图（兼容旧逻辑）
-    character.reference_image_path = image.image_path
+    # 注意：reference_image_path 在数据库中有 NOT NULL 约束，所以用空字符串代替 None
+    character.reference_image_path = image.image_path or ""
     character.reference_image_url = image.image_url
     character.updated_at = datetime.utcnow()
     session.add(character)
@@ -799,20 +1099,20 @@ def mark_training_images(
 
 @router.post(
     "/characters/{character_id}/images/generate-variants",
-    response_model=CharacterImageListResponse,
+    response_model=GenerateReferenceJobResponse,
     responses={404: {"model": ErrorResponse}},
 )
 def generate_character_variants(
     character_id: str,
     request: GenerateVariantRequest,
     session: DBSession,
-    asset_service: AssetDep,
-) -> CharacterImageListResponse:
-    """基于锚定图生成变体图片（不同姿态/表情/角度）
+) -> GenerateReferenceJobResponse:
+    """基于锚定图生成变体图片（不同姿态/表情/角度）- 异步
 
     必须先设置锚定图才能生成变体。
+    此端点立即返回 Job ID，图片生成在后台异步进行。
     """
-    logger.info(f"Generating variants for character {character_id}")
+    logger.info(f"Starting async variant generation for character {character_id}")
 
     character = session.get(Character, character_id)
     if not character:
@@ -828,105 +1128,78 @@ def generate_character_variants(
             detail="Please set an anchor image first before generating variants.",
         )
 
-    # 构建变体 prompt
-    base_prompt = character.appearance_prompt or character.prompt_base or character.name
-    variant_parts = []
+    # 获取 project_id
+    project_id = character.project_id
+    if not project_id:
+        project_id = character_id.split("_")[0] if "_" in character_id else "default"
 
-    if request.pose:
-        variant_parts.append(request.pose)
-    if request.expression:
-        variant_parts.append(request.expression)
-    if request.angle:
-        variant_parts.append(request.angle)
-    if request.custom_prompt:
-        variant_parts.append(request.custom_prompt)
+    # 创建 Job 记录
+    job = Job(
+        project_id=project_id,
+        job_type=JobType.ASSET_GENERATION,
+        status=JobStatus.PENDING,
+        progress=0.0,
+        result={
+            "character_id": character_id,
+            "num_images": request.num_images,
+            "generation_type": "variant",
+            "pose": request.pose,
+            "expression": request.expression,
+            "angle": request.angle,
+        }
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
 
-    variant_desc = ", ".join(variant_parts) if variant_parts else "portrait"
-    full_prompt = f"{base_prompt}, {variant_desc}"
+    # 触发 Celery 任务
+    from tasks.assets import generate_character_variants_task
 
-    style_preset = request.style_preset or "anime style"
-    negative_prompt = request.negative_prompt
-    seed = request.seed
+    celery_task = generate_character_variants_task.delay(
+        job_id=job.id,
+        character_id=character_id,
+        project_id=project_id,
+        num_images=request.num_images,
+        style_preset=request.style_preset or "anime style",
+        pose=request.pose,
+        expression=request.expression,
+        angle=request.angle,
+        custom_prompt=request.custom_prompt,
+        negative_prompt=request.negative_prompt,
+        seed=request.seed,
+    )
 
-    try:
-        # 使用锚定图作为参考进行 I2I 生成
-        candidates = asset_service.manager.generate_reference_images(
-            character=character,
-            style_spec=style_preset,
-            n=request.num_images,
-            project_id=character.project_id,
-            style_preset=style_preset,
-            negative_prompt=negative_prompt,
-            seed=seed,
-            prompt_override=full_prompt,
-            reference_image=character.anchor_image_path or character.anchor_image_url,
-        )
+    # 更新 Job 的 celery_task_id
+    job.celery_task_id = celery_task.id
+    session.add(job)
+    session.commit()
 
-        if not candidates:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to generate variant images",
-            )
+    logger.info(f"Created async variant job {job.id} for character {character_id}")
 
-        # 存入图片库
-        created_images = []
-        for candidate in candidates:
-            image = CharacterImage(
-                character_id=character_id,
-                image_type=CharacterImageType.VARIANT,
-                image_path=candidate.local_path,
-                image_url=candidate.oss_url,
-                prompt=full_prompt,
-                pose=request.pose,
-                expression=request.expression,
-                angle=request.angle,
-                style_preset=style_preset,
-                generation_metadata={
-                    "custom_prompt": request.custom_prompt,
-                    "anchor_image": character.anchor_image_path,
-                    "negative_prompt": negative_prompt,
-                    "seed": candidate.seed,
-                }
-            )
-            session.add(image)
-            created_images.append(image)
-
-        session.commit()
-
-        for img in created_images:
-            session.refresh(img)
-
-        logger.info(f"Generated {len(created_images)} variant images for {character_id}")
-
-        return CharacterImageListResponse(
-            items=[CharacterImageResponse.model_validate(img) for img in created_images],
-            total=len(created_images),
-        )
-
-    except Exception as e:
-        logger.error(f"Failed to generate variants for {character_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate variant images: {str(e)}",
-        )
+    return GenerateReferenceJobResponse(
+        job_id=job.id,
+        character_id=character_id,
+        status=JobStatus.PENDING,
+        message=f"变体图生成任务已创建，共 {request.num_images} 张图片",
+    )
 
 
 @router.post(
     "/characters/{character_id}/images/batch-generate-variants",
-    response_model=CharacterImageListResponse,
+    response_model=GenerateReferenceJobResponse,
     responses={404: {"model": ErrorResponse}},
 )
 def batch_generate_character_variants(
     character_id: str,
     request: BatchGenerateVariantRequest,
     session: DBSession,
-    asset_service: AssetDep,
-) -> CharacterImageListResponse:
-    """批量生成多种变体图片
+) -> GenerateReferenceJobResponse:
+    """批量生成多种变体图片 - 异步
 
     一次性生成多种姿态/表情/角度的组合。
+    此端点立即返回 Job ID，图片生成在后台异步进行。
     """
-    logger.info(f"Batch generating variants for character {character_id}")
+    logger.info(f"Starting async batch variant generation for character {character_id}")
 
     character = session.get(Character, character_id)
     if not character:
@@ -941,78 +1214,99 @@ def batch_generate_character_variants(
             detail="Please set an anchor image first before generating variants.",
         )
 
-    # 如果没有指定变体，使用默认的姿态/表情组合
+    # 如果没有指定变体，使用全面的姿态/表情/角度组合
     variants = request.variants
     if not variants:
+        # 常见表情
+        expressions = ["neutral", "smiling", "laughing", "serious", "surprised", "sad", "angry", "shy"]
+        # 常见姿态
+        poses = ["standing", "sitting", "walking"]
+        # 常见角度
+        angles = ["front view", "three-quarter view", "side view", "low angle", "high angle"]
+
         variants = [
+            # === 正面角度 - 各种表情 ===
             {"pose": "standing", "expression": "neutral", "angle": "front view"},
+            {"pose": "standing", "expression": "smiling", "angle": "front view"},
+            {"pose": "standing", "expression": "laughing", "angle": "front view"},
+            {"pose": "standing", "expression": "serious", "angle": "front view"},
+            {"pose": "standing", "expression": "surprised", "angle": "front view"},
+            {"pose": "standing", "expression": "sad", "angle": "front view"},
+            {"pose": "standing", "expression": "angry", "angle": "front view"},
+            {"pose": "standing", "expression": "shy", "angle": "front view"},
+
+            # === 四分之三角度 - 常用表情 ===
+            {"pose": "standing", "expression": "neutral", "angle": "three-quarter view"},
             {"pose": "standing", "expression": "smiling", "angle": "three-quarter view"},
+            {"pose": "standing", "expression": "serious", "angle": "three-quarter view"},
+
+            # === 侧面角度 ===
+            {"pose": "standing", "expression": "neutral", "angle": "side view"},
+            {"pose": "standing", "expression": "serious", "angle": "side view"},
+
+            # === 仰视/俯视角度 ===
+            {"pose": "standing", "expression": "neutral", "angle": "low angle"},
+            {"pose": "standing", "expression": "serious", "angle": "high angle"},
+
+            # === 坐姿变体 ===
+            {"pose": "sitting", "expression": "neutral", "angle": "front view"},
+            {"pose": "sitting", "expression": "smiling", "angle": "three-quarter view"},
             {"pose": "sitting", "expression": "serious", "angle": "side view"},
-            {"pose": "walking", "expression": "happy", "angle": "front view"},
+
+            # === 走路姿态 ===
+            {"pose": "walking", "expression": "neutral", "angle": "front view"},
+            {"pose": "walking", "expression": "smiling", "angle": "three-quarter view"},
         ]
 
-    base_prompt = character.appearance_prompt or character.prompt_base or character.name
-    style_preset = request.style_preset or "anime style"
-    negative_prompt = request.negative_prompt
+    # 获取 project_id
+    project_id = character.project_id
+    if not project_id:
+        project_id = character_id.split("_")[0] if "_" in character_id else "default"
 
-    all_created_images = []
+    # 创建 Job 记录
+    job = Job(
+        project_id=project_id,
+        job_type=JobType.ASSET_GENERATION,
+        status=JobStatus.PENDING,
+        progress=0.0,
+        result={
+            "character_id": character_id,
+            "num_images": len(variants),
+            "generation_type": "batch_variant",
+            "variants": variants,
+            "image_provider": request.image_provider,
+        }
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
 
-    for variant in variants:
-        pose = variant.get("pose", "")
-        expression = variant.get("expression", "")
-        angle = variant.get("angle", "")
-        custom = variant.get("custom_prompt", "")
+    # 触发 Celery 任务
+    from tasks.assets import batch_generate_character_variants_task
 
-        variant_parts = [p for p in [pose, expression, angle, custom] if p]
-        variant_desc = ", ".join(variant_parts) if variant_parts else "portrait"
-        full_prompt = f"{base_prompt}, {variant_desc}"
+    celery_task = batch_generate_character_variants_task.delay(
+        job_id=job.id,
+        character_id=character_id,
+        project_id=project_id,
+        variants=variants,
+        style_preset=request.style_preset or "anime style",
+        negative_prompt=request.negative_prompt,
+        image_provider=request.image_provider,
+    )
 
-        try:
-            candidates = asset_service.manager.generate_reference_images(
-                character=character,
-                style_spec=style_preset,
-                n=1,
-                project_id=character.project_id,
-                style_preset=style_preset,
-                negative_prompt=negative_prompt,
-                prompt_override=full_prompt,
-                reference_image=character.anchor_image_path or character.anchor_image_url,
-            )
-
-            if candidates:
-                for candidate in candidates:
-                    metadata = dict(variant)
-                    metadata["negative_prompt"] = negative_prompt
-                    metadata["seed"] = candidate.seed
-                    image = CharacterImage(
-                        character_id=character_id,
-                        image_type=CharacterImageType.VARIANT,
-                        image_path=candidate.local_path,
-                        image_url=candidate.oss_url,
-                        prompt=full_prompt,
-                        pose=pose or None,
-                        expression=expression or None,
-                        angle=angle or None,
-                        style_preset=style_preset,
-                        generation_metadata=metadata,
-                    )
-                    session.add(image)
-                    all_created_images.append(image)
-
-        except Exception as e:
-            logger.warning(f"Failed to generate variant {variant}: {e}")
-            continue
-
+    # 更新 Job 的 celery_task_id
+    job.celery_task_id = celery_task.id
+    session.add(job)
     session.commit()
 
-    for img in all_created_images:
-        session.refresh(img)
+    provider_info = f"，使用 {request.image_provider}" if request.image_provider else ""
+    logger.info(f"Created async batch variant job {job.id} for character {character_id}")
 
-    logger.info(f"Batch generated {len(all_created_images)} variant images for {character_id}")
-
-    return CharacterImageListResponse(
-        items=[CharacterImageResponse.model_validate(img) for img in all_created_images],
-        total=len(all_created_images),
+    return GenerateReferenceJobResponse(
+        job_id=job.id,
+        character_id=character_id,
+        status=JobStatus.PENDING,
+        message=f"批量变体图生成任务已创建，共 {len(variants)} 张图片{provider_info}",
     )
 
 

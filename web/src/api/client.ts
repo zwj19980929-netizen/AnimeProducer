@@ -49,6 +49,7 @@ import type {
   VoicePreviewResponse,
   AvailableVoicesResponse,
   LoRAStartTrainingRequest,
+  LoRAStartTrainingJobResponse,
   CharacterLoRA,
   LoRATrainingStatusResponse,
   LoRAListResponse,
@@ -56,7 +57,8 @@ import type {
   LoginRequest,
   RegisterRequest,
   Token,
-  User
+  User,
+  GenerateReferenceJobResponse
 } from '@/types/api'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
@@ -438,12 +440,23 @@ class ApiClient {
       negative_prompt?: string
       seed?: number
       num_candidates?: number
+      image_provider?: 'google' | 'aliyun'
     }
-  ): Promise<CharacterImageListResponse> {
-    const response = await this.client.post<CharacterImageListResponse>(
+  ): Promise<GenerateReferenceJobResponse> {
+    const response = await this.client.post<GenerateReferenceJobResponse>(
       `/assets/characters/${characterId}/generate-reference`,
-      options || {},
-      { timeout: this.longTimeout }
+      options || {}
+    )
+    return response.data
+  }
+
+  async listCharacterGenerationJobs(
+    characterId: string,
+    limit: number = 10
+  ): Promise<Job[]> {
+    const response = await this.client.get<Job[]>(
+      `/assets/characters/${characterId}/generation-jobs`,
+      { params: { limit } }
     )
     return response.data
   }
@@ -474,6 +487,46 @@ class ApiClient {
     await this.client.delete(`/assets/characters/${characterId}/images/${imageId}`)
   }
 
+  async uploadCharacterImage(
+    characterId: string,
+    file: File,
+    markForTraining: boolean = true
+  ): Promise<CharacterImage> {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('mark_for_training', String(markForTraining))
+
+    const response = await this.client.post<CharacterImage>(
+      `/assets/characters/${characterId}/images/upload`,
+      formData,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: this.longTimeout,
+      }
+    )
+    return response.data
+  }
+
+  async uploadCharacterImagesBatch(
+    characterId: string,
+    files: File[],
+    markForTraining: boolean = true
+  ): Promise<CharacterImageListResponse> {
+    const formData = new FormData()
+    files.forEach(file => formData.append('files', file))
+    formData.append('mark_for_training', String(markForTraining))
+
+    const response = await this.client.post<CharacterImageListResponse>(
+      `/assets/characters/${characterId}/images/upload-batch`,
+      formData,
+      {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: this.longTimeout,
+      }
+    )
+    return response.data
+  }
+
   async setAnchorImage(characterId: string, imageId: string): Promise<Character> {
     const response = await this.client.post<Character>(
       `/assets/characters/${characterId}/images/set-anchor`,
@@ -497,11 +550,10 @@ class ApiClient {
   async generateCharacterVariants(
     characterId: string,
     options: GenerateVariantRequest
-  ): Promise<CharacterImageListResponse> {
-    const response = await this.client.post<CharacterImageListResponse>(
+  ): Promise<GenerateReferenceJobResponse> {
+    const response = await this.client.post<GenerateReferenceJobResponse>(
       `/assets/characters/${characterId}/images/generate-variants`,
-      options,
-      { timeout: this.longTimeout }
+      options
     )
     return response.data
   }
@@ -509,11 +561,10 @@ class ApiClient {
   async batchGenerateCharacterVariants(
     characterId: string,
     options: BatchGenerateVariantRequest
-  ): Promise<CharacterImageListResponse> {
-    const response = await this.client.post<CharacterImageListResponse>(
+  ): Promise<GenerateReferenceJobResponse> {
+    const response = await this.client.post<GenerateReferenceJobResponse>(
       `/assets/characters/${characterId}/images/batch-generate-variants`,
-      options,
-      { timeout: this.longTimeout }
+      options
     )
     return response.data
   }
@@ -644,11 +695,10 @@ class ApiClient {
   }
 
   // LoRA Training
-  async startLoRATraining(data: LoRAStartTrainingRequest): Promise<CharacterLoRA> {
-    const response = await this.client.post<CharacterLoRA>(
+  async startLoRATraining(data: LoRAStartTrainingRequest): Promise<LoRAStartTrainingJobResponse> {
+    const response = await this.client.post<LoRAStartTrainingJobResponse>(
       '/lora/train',
-      data,
-      { timeout: this.longTimeout }
+      data
     )
     return response.data
   }

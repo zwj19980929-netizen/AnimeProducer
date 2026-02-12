@@ -11,6 +11,9 @@ from core.models import Shot, ShotRender, ShotRenderStatus, Character, Job, JobS
 from core.pipeline import ShotPipeline
 from core.editor import AlignmentStrategy
 from core.cache import cache, is_job_cancelled_cached
+from core.lora_manager import lora_manager
+from integrations.lipsync_client import LipSyncClientFactory, LipSyncRequest
+from integrations.sfx_generator import sfx_generator, sfx_mixer, SFXLayer
 from tasks.celery_app import celery_app
 from api.websocket import publish_job_update_sync, publish_shot_render_update_sync
 
@@ -114,6 +117,9 @@ def render_shot(self, shot_id: int):
             "camera_movement": shot.camera_movement,
             "duration": shot.duration,
             "project_id": project_id,
+            "scene_description": shot.visual_prompt,  # 用于 SFX 提取
+            "sfx_tags": getattr(shot, 'sfx_tags', None),  # 音效标签
+            "characters_in_shot": shot.characters_in_shot,
         }
 
         reference_image_path = get_reference_image_for_shot(shot, session)
@@ -121,6 +127,15 @@ def render_shot(self, shot_id: int):
         render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
         render_id = render_record.id if render_record else None
         job_id = render_record.job_id if render_record else None
+
+        # Step 1: 获取角色 LoRA
+        lora_url = None
+        if shot.characters_in_shot:
+            char_id = shot.characters_in_shot[0]
+            active_lora = lora_manager.get_character_lora(char_id, session)
+            if active_lora:
+                lora_url = active_lora.lora_url
+                logger.info(f"Using LoRA for character {char_id}: {lora_url}")
 
     if render_id:
         update_render_status(
@@ -131,6 +146,7 @@ def render_shot(self, shot_id: int):
     try:
         logger.info(f"Processing shot {shot_id} via ShotPipeline...")
 
+        # Step 2: 调用 Pipeline 生成视频和音频
         artifact = pipeline.process_shot(
             shot_id=shot_data["shot_id"],
             visual_prompt=shot_data["visual_prompt"],
@@ -139,12 +155,62 @@ def render_shot(self, shot_id: int):
             camera_movement=shot_data["camera_movement"],
             voice_id="alloy",
             target_duration=shot_data["duration"],
-            alignment_strategy=AlignmentStrategy.LOOP
+            alignment_strategy=AlignmentStrategy.LOOP,
+            lora_url=lora_url  # 传递 LoRA URL
         )
 
+        current_video = artifact.video_path
+        current_audio = artifact.audio_path
+
+        # Step 3: Lip-Sync 处理
+        if shot_data["dialogue"] and current_video and current_audio:
+            if render_id:
+                update_render_status(
+                    render_id, ShotRenderStatus.GENERATING_VIDEO, 0.7,
+                    error="Lip-Syncing...",
+                    project_id=project_id, job_id=job_id
+                )
+            try:
+                logger.info(f"Applying lip-sync for shot {shot_id}...")
+                client = LipSyncClientFactory.get_default_client()
+                lip_sync_result = client.process(LipSyncRequest(
+                    video_path=current_video,
+                    audio_path=current_audio
+                ))
+                current_video = lip_sync_result.video_path
+                logger.info(f"Lip-sync completed for shot {shot_id}")
+            except Exception as e:
+                logger.error(f"LipSync failed for shot {shot_id}: {e}")
+                # 降级：使用原始视频，不中断流程
+
+        # Step 4: SFX 音效处理
+        sfx_tags = shot_data.get("sfx_tags")
+        if sfx_tags:
+            if render_id:
+                update_render_status(
+                    render_id, ShotRenderStatus.GENERATING_AUDIO, 0.9,
+                    error="Generating SFX...",
+                    project_id=project_id, job_id=job_id
+                )
+            try:
+                logger.info(f"Generating SFX for shot {shot_id} with tags: {sfx_tags}")
+                sfx_list = sfx_generator.generate_sfx_for_shot(
+                    scene_description=shot_data["scene_description"],
+                    shot_duration=artifact.duration,
+                    sfx_tags=sfx_tags
+                )
+                if sfx_list and current_audio:
+                    layers = [SFXLayer(audio_path=sfx.audio_path, volume=0.3) for sfx in sfx_list]
+                    current_audio = sfx_mixer.mix_with_dialogue(current_audio, layers)
+                    logger.info(f"SFX mixed for shot {shot_id}")
+            except Exception as e:
+                logger.error(f"SFX generation failed for shot {shot_id}: {e}")
+                # 降级：使用原始音频，不中断流程
+
+        # Step 5: 最终结果
         result_paths = {
-            "video": artifact.video_path,
-            "audio": artifact.audio_path
+            "video": current_video,
+            "audio": current_audio
         }
 
         if render_id:
@@ -154,13 +220,13 @@ def render_shot(self, shot_id: int):
             )
 
         duration = (datetime.utcnow() - start_time).total_seconds()
-        logger.info(f"Shot {shot_id} finished in {duration:.2f}s. Video: {artifact.video_path}")
+        logger.info(f"Shot {shot_id} finished in {duration:.2f}s. Video: {current_video}")
 
         return {
             "shot_id": shot_id,
             "status": "completed",
-            "video_path": artifact.video_path,
-            "audio_path": artifact.audio_path,
+            "video_path": current_video,
+            "audio_path": current_audio,
             "duration": artifact.duration,
             "dialogue": shot_data["dialogue"]
         }

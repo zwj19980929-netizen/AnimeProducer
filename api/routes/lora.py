@@ -2,7 +2,7 @@
 LoRA API Routes - LoRA 训练管理 API
 
 提供 LoRA 训练流水线的 RESTful API：
-- 启动训练
+- 启动训练（异步）
 - 查询状态
 - 列出 LoRA
 - 取消训练
@@ -11,13 +11,13 @@ LoRA API Routes - LoRA 训练管理 API
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
 from api.deps import get_db
 from core.lora_manager import lora_manager
-from core.models import CharacterLoRA, LoRATrainingStatus
+from core.models import CharacterLoRA, LoRATrainingStatus, Character, Job, JobType, JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,15 @@ class LoRAResponse(BaseModel):
         )
 
 
+class StartTrainingJobResponse(BaseModel):
+    """启动训练任务响应"""
+    job_id: str
+    lora_id: str
+    character_id: str
+    status: str
+    message: str
+
+
 class TrainingStatusResponse(BaseModel):
     """训练状态响应"""
     lora_id: str
@@ -85,13 +94,16 @@ class TrainingStatusResponse(BaseModel):
 # ============================================================================
 
 
-@router.post("/train", response_model=LoRAResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/train", response_model=StartTrainingJobResponse, status_code=status.HTTP_201_CREATED)
 async def start_lora_training(
     request: StartTrainingRequest,
     db: Session = Depends(get_db)
 ):
     """
-    启动 LoRA 训练
+    启动 LoRA 训练（异步）
+
+    立即返回 Job ID，训练在后台异步进行。
+    通过轮询 /jobs/{job_id} 或 /lora/{lora_id}/status 获取进度。
 
     训练图片来源（按优先级）：
     1. 如果指定了 image_ids，使用这些图片
@@ -99,27 +111,86 @@ async def start_lora_training(
     3. 如果图片不足，基于锚定图自动生成补充图片
     4. 如果没有锚定图，使用 ancestor_image_path 或参考图
     """
-    try:
-        lora = lora_manager.start_lora_training(
-            character_id=request.character_id,
-            ancestor_image_path=request.ancestor_image_path,
-            image_ids=request.image_ids,
-            use_selected_images=request.use_selected_images,
-            num_dataset_images=request.num_dataset_images,
-            training_steps=request.training_steps,
-            provider=request.provider,
-            session=db
-        )
-        return LoRAResponse.from_model(lora)
-
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error starting LoRA training: {e}")
+    # 验证角色存在
+    character = db.get(Character, request.character_id)
+    if not character:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to start training: {str(e)}"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Character not found: {request.character_id}"
         )
+
+    # 获取 project_id
+    project_id = character.project_id
+    if not project_id:
+        project_id = request.character_id.split("_")[0] if "_" in request.character_id else "default"
+
+    # 生成触发词
+    clean_name = character.name.lower().replace(" ", "_")
+    clean_name = "".join(c for c in clean_name if c.isalnum() or c == "_")
+    trigger_word = f"ohwx_{clean_name}"
+
+    # 创建 LoRA 记录
+    lora = CharacterLoRA(
+        character_id=request.character_id,
+        base_model="flux",
+        trigger_word=trigger_word,
+        training_provider=request.provider,
+        status=LoRATrainingStatus.PENDING,
+        training_steps=request.training_steps,
+        dataset_size=request.num_dataset_images,
+    )
+    db.add(lora)
+    db.commit()
+    db.refresh(lora)
+
+    # 创建 Job 记录
+    job = Job(
+        project_id=project_id,
+        job_type=JobType.ASSET_GENERATION,
+        status=JobStatus.PENDING,
+        progress=0.0,
+        result={
+            "type": "lora_training",
+            "character_id": request.character_id,
+            "lora_id": lora.id,
+            "training_steps": request.training_steps,
+            "provider": request.provider,
+        }
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    # 触发 Celery 任务
+    from tasks.assets import start_lora_training_task
+
+    celery_task = start_lora_training_task.delay(
+        job_id=job.id,
+        lora_id=lora.id,
+        character_id=request.character_id,
+        project_id=project_id,
+        ancestor_image_path=request.ancestor_image_path,
+        image_ids=request.image_ids,
+        use_selected_images=request.use_selected_images,
+        num_dataset_images=request.num_dataset_images,
+        training_steps=request.training_steps,
+        provider=request.provider,
+    )
+
+    # 更新 Job 的 celery_task_id
+    job.celery_task_id = celery_task.id
+    db.add(job)
+    db.commit()
+
+    logger.info(f"Started LoRA training job {job.id} for character {request.character_id}, lora_id={lora.id}")
+
+    return StartTrainingJobResponse(
+        job_id=job.id,
+        lora_id=lora.id,
+        character_id=request.character_id,
+        status=JobStatus.PENDING.value,
+        message=f"LoRA 训练任务已创建，共 {request.training_steps} 步训练"
+    )
 
 
 @router.get("/{lora_id}", response_model=LoRAResponse)
@@ -137,15 +208,17 @@ async def get_lora(
 @router.get("/{lora_id}/status", response_model=TrainingStatusResponse)
 async def check_training_status(
     lora_id: str,
+    force: bool = Query(default=True, description="强制从云端刷新状态（即使本地状态是失败）"),
     db: Session = Depends(get_db)
 ):
     """
     检查训练状态
 
     轮询云端训练任务状态，更新数据库记录。
+    如果 force=True，即使本地状态是 FAILED 也会重新查询云端（用于恢复断开的连接）。
     """
     try:
-        lora = lora_manager.check_training_status(lora_id, session=db)
+        lora = lora_manager.check_training_status(lora_id, session=db, force_check=force)
         return TrainingStatusResponse(
             lora_id=lora.id,
             status=lora.status.value,
