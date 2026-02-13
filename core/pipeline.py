@@ -1081,6 +1081,9 @@ class ShotPipeline:
         previous_frame_path: Optional[str] = None,
         # Lip-Sync 参数
         enable_lipsync: Optional[bool] = None,
+        # LoRA 参数（可直接传递，优先于 character_ids 自动加载）
+        lora_url: Optional[str] = None,
+        lora_scale: float = 0.8,
     ) -> ShotArtifact:
         """
         处理单个镜头的完整流水线 (Audio-First)
@@ -1149,14 +1152,13 @@ class ShotPipeline:
         effective_reference_image = reference_image_path
         effective_voice_id = voice_id
         character_tags: List[str] = []
-        # LoRA 支持
-        effective_lora_url: Optional[str] = None
-        effective_lora_scale: float = 0.8
+        # LoRA 支持（优先使用直接传递的参数）
+        effective_lora_url: Optional[str] = lora_url
+        effective_lora_scale: float = lora_scale
         effective_trigger_word: Optional[str] = None
 
-        # ========== LoRA 加载（独立于 character_registry）==========
-        # 即使没有 character_registry，也尝试加载 LoRA
-        if character_ids:
+        # ========== LoRA 加载（如果未直接传递，则从 character_ids 自动加载）==========
+        if not effective_lora_url and character_ids:
             try:
                 from core.lora_manager import lora_manager
                 lora = lora_manager.get_character_lora(character_ids[0])

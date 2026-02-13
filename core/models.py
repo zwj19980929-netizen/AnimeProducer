@@ -262,6 +262,14 @@ class Shot(SQLModel, table=True):
     episode_id: str | None = Field(default=None, foreign_key="episodes.id", index=True)
     chapter_id: str | None = Field(default=None, foreign_key="chapters.chapter_id", index=True)
 
+    # 场景 ID，用于标识同一场景下的镜头（空间连贯性）
+    # 同一 scene_id 的镜头会自动使用上一镜头的最后一帧作为参考
+    scene_id: str | None = Field(
+        default=None,
+        index=True,
+        description="场景 ID，同一场景下的镜头共享此 ID 以保持空间连贯性"
+    )
+
     duration: float
     scene_description: str
     visual_prompt: str

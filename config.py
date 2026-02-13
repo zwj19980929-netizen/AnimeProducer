@@ -171,6 +171,13 @@ class Settings(BaseSettings):
     ELEVENLABS_API_KEY: str = ""  # ElevenLabs API Key
     SFX_DEFAULT_VOLUME: float = 0.3  # 音效默认音量（相对于对白）
 
+    # ========== AI Critic (Video Quality Check) Settings ==========
+    CRITIC_ENABLED: bool = True  # 是否启用 AI 影评人质量检查
+    CRITIC_PROVIDER: str = "gemini"  # gemini, openai (推荐 gemini，视频理解能力更强)
+    CRITIC_MODEL: str = "gemini-1.5-pro"  # 评估模型
+    CRITIC_MIN_SCORE: int = 8  # 最低通过分数 (0-10)
+    CRITIC_MAX_RETRIES: int = 2  # 质量不达标时最大重试次数
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

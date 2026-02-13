@@ -14,6 +14,11 @@ class ShotDraft(BaseModel):
     characters_in_shot: List[str] = []
     dialogue: Optional[str] = None
     action_type: Optional[str] = None
+    # 场景 ID，用于空间连贯性
+    scene_id: Optional[str] = Field(
+        default=None,
+        description="场景 ID，同一场景下的镜头共享此 ID 以保持空间连贯性"
+    )
     # 情感字段
     emotion: str = Field(
         default="neutral",
@@ -106,8 +111,15 @@ Rules:
 6. Identify characters present in the shot by name.
 7. Specify action_type if applicable (e.g., "dialogue", "action", "transition").
 
+**IMPORTANT - Scene Grouping (场景分组):**
+8. Group shots by SCENE - shots that happen in the same physical location should share the same scene_id.
+   - A new scene starts when: location changes, significant time passes, or "EXT."/"INT." markers appear.
+   - Use descriptive scene_id like "scene_1_forest", "scene_2_tavern", "scene_3_battlefield".
+   - Consecutive shots in the same location MUST have the same scene_id.
+   - This enables spatial continuity: the last frame of shot N becomes a reference for shot N+1.
+
 **IMPORTANT - Emotion Analysis:**
-8. For each shot, analyze the emotional tone based on dialogue, action, and context:
+9. For each shot, analyze the emotional tone based on dialogue, action, and context:
    - emotion: Choose from: happy, sad, angry, fearful, surprised, excited, tense, neutral
    - emotion_intensity: A number from 0.0 to 1.0 indicating how strong the emotion is
      * 0.0-0.3: Mild emotion
@@ -139,12 +151,16 @@ Novel Text:
             storyboard = self.llm.generate_structured_output(prompt, Storyboard)
             if storyboard and storyboard.shots:
                 logger.info(f"Successfully parsed {len(storyboard.shots)} shots")
-                # 记录情感分析结果
+                # 记录场景和情感分析结果
+                scene_counts = {}
                 for i, shot in enumerate(storyboard.shots):
+                    scene_id = shot.scene_id or "unknown"
+                    scene_counts[scene_id] = scene_counts.get(scene_id, 0) + 1
                     logger.debug(
-                        f"Shot {i+1}: emotion={shot.emotion}, "
+                        f"Shot {i+1}: scene={scene_id}, emotion={shot.emotion}, "
                         f"intensity={shot.emotion_intensity:.2f}"
                     )
+                logger.info(f"Scene distribution: {scene_counts}")
                 return storyboard.shots
             else:
                 logger.warning("LLM returned empty storyboard")
