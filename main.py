@@ -10,12 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import api_test, assets, books, chapters, episodes, jobs, projects, ws, auth, lora
+from api.routes import assets, books, chapters, episodes, jobs, projects, ws, auth, lora
 from api.websocket import manager as ws_manager
 from config import settings
 from core.database import init_db
 from core.errors import AnimeMatrixError
-from core.metrics import get_metrics, get_metrics_content_type
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -91,10 +90,17 @@ async def request_logging_middleware(request: Request, call_next):
     return response
 
 
+# CORS configuration
+_allowed_origins: list[str] = []
+if settings.ALLOWED_ORIGINS:
+    _allowed_origins = [o.strip() for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
+if settings.DEBUG:
+    _allowed_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.DEBUG else [],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=False if "*" in _allowed_origins else True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -105,14 +111,17 @@ def health_check():
     return {"status": "healthy", "service": settings.PROJECT_NAME}
 
 
-@app.get("/metrics")
-def metrics():
-    """Prometheus metrics endpoint."""
-    from fastapi.responses import Response
-    return Response(
-        content=get_metrics(),
-        media_type=get_metrics_content_type()
-    )
+if settings.DEBUG:
+    from core.metrics import get_metrics, get_metrics_content_type
+
+    @app.get("/metrics")
+    def metrics():
+        """Prometheus metrics endpoint."""
+        from fastapi.responses import Response
+        return Response(
+            content=get_metrics(),
+            media_type=get_metrics_content_type()
+        )
 
 
 @app.get("/api/v1/info")
@@ -132,7 +141,12 @@ app.include_router(books.router, prefix="/api/v1/projects/{project_id}/book", ta
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(lora.router, prefix="/api/v1/lora", tags=["lora"])
-app.include_router(api_test.router, prefix="/api/v1/api-test", tags=["api-test"])
+
+if settings.DEBUG:
+    from api.routes import api_test
+    app.include_router(api_test.router, prefix="/api/v1/api-test", tags=["api-test"])
+
 app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
-app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")
+if settings.DEBUG:
+    app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")

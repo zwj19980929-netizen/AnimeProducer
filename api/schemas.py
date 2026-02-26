@@ -83,7 +83,7 @@ class ProjectStatusUpdate(BaseModel):
 
 class CharacterCreate(BaseModel):
     """Request schema for creating a character."""
-    character_id: str = Field(..., min_length=1, max_length=100)
+    character_id: str = Field(..., min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
     name: str = Field(..., min_length=1, max_length=200)
     appearance_prompt: str = Field(default="", description="角色外貌描述，用于生成图片")
     bio: str = Field(default="", description="角色简介/背景故事")
@@ -321,7 +321,6 @@ class JobResponse(BaseModel):
     progress: float
     result: dict[str, Any] | None
     error_message: str | None
-    error_traceback: str | None
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None

@@ -4,10 +4,11 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import func, select
 
-from api.deps import DBSession, DirectorDep
+from api.auth import get_current_active_user
+from api.deps import DBSession, DirectorDep, get_project_or_404
 from api.schemas import (
     EpisodeBatchCreate,
     EpisodeCreate,
@@ -26,18 +27,7 @@ from api.schemas import (
 from core.models import Chapter, ChapterStatus, Episode, EpisodeStatus, Job, JobStatus, JobType, Project, Shot
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
-
-
-def _get_project_or_404(session: DBSession, project_id: str) -> Project:
-    """获取项目，不存在则抛出 404。"""
-    project = session.get(Project, project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-    return project
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 
 @router.post(
@@ -56,7 +46,7 @@ def plan_episodes(
     """
     logger.info(f"Starting async episode planning for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查是否有章节
     chapter_count = session.exec(
@@ -181,7 +171,7 @@ def create_episode(
     """创建单个集。"""
     logger.info(f"Creating episode {episode_in.episode_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查集数是否已存在
     existing = session.exec(
@@ -268,7 +258,7 @@ def create_episodes_batch(
     """批量创建集（确认 AI 规划）。"""
     logger.info(f"Batch creating {len(batch_in.episodes)} episodes for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查集数是否有重复
     episode_numbers = [ep.episode_number for ep in batch_in.episodes]
@@ -361,7 +351,7 @@ def list_episodes(
     """列出项目所有集。"""
     logger.debug(f"Listing episodes for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     query = select(Episode).where(Episode.project_id == project_id)
 
@@ -390,7 +380,7 @@ def get_episode(
     """获取单集详情。"""
     logger.debug(f"Getting episode {episode_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     episode = session.exec(
         select(Episode).where(
@@ -422,7 +412,7 @@ def update_episode(
     """更新集信息。"""
     logger.info(f"Updating episode {episode_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     episode = session.exec(
         select(Episode).where(
@@ -475,7 +465,7 @@ def delete_episode(
     """删除集。"""
     logger.info(f"Deleting episode {episode_number} from project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     episode = session.exec(
         select(Episode).where(
@@ -520,7 +510,7 @@ def delete_all_episodes(
     """删除项目所有集（重新规划时使用）。"""
     logger.info(f"Deleting all episodes for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 清除所有章节的 suggested_episode 字段
     chapters = session.exec(
@@ -567,7 +557,7 @@ def generate_episode_storyboard(
     """
     logger.info(f"Generating storyboard for episode {episode_number} in project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     try:
         shots = director.director.generate_episode_storyboard(project_id, episode_number)
@@ -576,10 +566,10 @@ def generate_episode_storyboard(
             total=len(shots),
         )
     except Exception as e:
-        logger.error(f"Storyboard generation failed: {e}")
+        logger.error(f"Storyboard generation failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Storyboard generation failed",
         )
 
 
@@ -601,7 +591,7 @@ def start_episode_render(
     """
     logger.info(f"Starting render for episode {episode_number} in project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     try:
         job = director.director.start_episode_render_job(project_id, episode_number)
@@ -611,10 +601,10 @@ def start_episode_render(
             message=f"Episode {episode_number} render started successfully",
         )
     except Exception as e:
-        logger.error(f"Episode render start failed: {e}")
+        logger.error(f"Episode render start failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Episode render start failed",
         )
 
 
@@ -631,7 +621,7 @@ def list_episode_shots(
     """获取单集的所有分镜。"""
     logger.debug(f"Listing shots for episode {episode_number} in project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     episode = session.exec(
         select(Episode).where(

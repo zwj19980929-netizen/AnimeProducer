@@ -3,9 +3,10 @@
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import func, select
 
+from api.auth import get_current_active_user
 from api.deps import DBSession
 from api.schemas import (
     ErrorResponse,
@@ -20,7 +21,7 @@ from api.schemas import (
 from core.models import Job, JobStatus, JobType, Project, ProjectStatus, ShotRender, ShotRenderStatus
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 
 @router.post(

@@ -4,11 +4,12 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, Query, status, UploadFile, File, Form
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlmodel import func, select
 
+from api.auth import get_current_active_user
 from api.deps import AssetDep, DBSession
 from api.schemas import (
     CharacterCreate,
@@ -33,7 +34,29 @@ from api.schemas import (
 from core.models import Character, CharacterImage, CharacterImageType, Project, Job, JobType, JobStatus
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
+
+# Magic bytes for image validation
+_IMAGE_SIGNATURES = {
+    b"\xff\xd8\xff": "image/jpeg",
+    b"\x89PNG": "image/png",
+}
+
+
+def _validate_image_magic_bytes(data: bytes) -> bool:
+    """Validate image file by checking magic bytes."""
+    if len(data) < 12:
+        return False
+    # JPEG
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    # PNG
+    if data[:4] == b"\x89PNG":
+        return True
+    # WebP (RIFF....WEBP)
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    return False
 
 
 @router.post(
@@ -308,16 +331,12 @@ def list_character_generation_jobs(
             detail=f"Character not found: {character_id}",
         )
 
-    # 查询该角色的生成任务
-    from sqlalchemy import cast, String
-    from sqlmodel import JSON
-
-    query = (
-        select(Job)
-        .where(Job.job_type == JobType.ASSET_GENERATION)
-        .order_by(Job.created_at.desc())
-        .limit(limit)
-    )
+    # 查询该角色的生成任务（先按 project_id 缩小范围）
+    project_id = character.project_id
+    query = select(Job).where(Job.job_type == JobType.ASSET_GENERATION)
+    if project_id:
+        query = query.where(Job.project_id == project_id)
+    query = query.order_by(Job.created_at.desc()).limit(limit)
 
     jobs = session.exec(query).all()
 
@@ -390,10 +409,10 @@ def upload_character_image_to_oss(
         return CharacterResponse.model_validate(character)
 
     except Exception as e:
-        logger.error(f"Failed to upload to OSS: {e}")
+        logger.error(f"Failed to upload to OSS: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload to OSS: {str(e)}",
+            detail="Failed to upload to OSS",
         )
 
 
@@ -570,10 +589,10 @@ def preview_voice(
         )
 
     except Exception as e:
-        logger.error(f"Failed to preview voice: {e}")
+        logger.error(f"Failed to preview voice: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to preview voice: {str(e)}",
+            detail="Failed to preview voice",
         )
 
 
@@ -774,15 +793,23 @@ async def upload_character_image(
     try:
         file_content = await file.read()
     except Exception as e:
+        logger.error(f"Failed to read uploaded file: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read file: {str(e)}",
+            detail="Failed to read file",
         )
 
     if len(file_content) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty file",
+        )
+
+    # Validate magic bytes
+    if not _validate_image_magic_bytes(file_content):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="File content does not match a valid image format",
         )
 
     # 限制文件大小 (10MB)
@@ -857,10 +884,10 @@ async def upload_character_image(
                 os.remove(image_path)
             except Exception:
                 pass
-        logger.error(f"Failed to upload image: {e}")
+        logger.error(f"Failed to upload image: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to upload image: {str(e)}",
+            detail="Failed to upload image",
         )
 
 
@@ -937,6 +964,10 @@ async def upload_character_images_batch(
 
             if len(file_content) > max_size:
                 errors.append(f"File {idx + 1}: Too large")
+                continue
+
+            if not _validate_image_magic_bytes(file_content):
+                errors.append(f"File {idx + 1}: Invalid image content")
                 continue
 
             ext = ext_map.get(file.content_type, ".png")

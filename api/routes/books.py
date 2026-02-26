@@ -4,10 +4,11 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlmodel import select
 
-from api.deps import DBSession
+from api.auth import get_current_active_user
+from api.deps import DBSession, get_project_or_404
 from api.schemas import (
     BookResponse,
     BookUpdate,
@@ -18,18 +19,7 @@ from api.schemas import (
 from core.models import Book, BookUploadStatus, Chapter, ChapterStatus, Project
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
-
-
-def _get_project_or_404(session: DBSession, project_id: str) -> Project:
-    """获取项目，不存在则抛出 404。"""
-    project = session.get(Project, project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-    return project
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 
 def _get_or_create_book(session: DBSession, project_id: str) -> Book:
@@ -59,7 +49,7 @@ def get_book(
     """获取书籍信息。"""
     logger.debug(f"Getting book for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
     book = _get_or_create_book(session, project_id)
 
     return book
@@ -78,7 +68,7 @@ def update_book(
     """更新书籍元数据。"""
     logger.info(f"Updating book for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
     book = _get_or_create_book(session, project_id)
 
     update_data = book_in.model_dump(exclude_unset=True)
@@ -119,7 +109,7 @@ async def upload_book(
     """
     logger.info(f"Uploading book for project: {project_id}, file: {file.filename}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查文件类型
     if not file.filename:
@@ -157,7 +147,7 @@ async def upload_book(
         logger.error(f"Failed to read file: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to read file: {str(e)}",
+            detail="Failed to read file",
         )
 
     # 解析书籍
@@ -168,7 +158,7 @@ async def upload_book(
         logger.error(f"Failed to parse book: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to parse book: {str(e)}",
+            detail="Failed to parse book",
         )
 
     if not parse_result.chapters:
@@ -258,7 +248,7 @@ def analyze_book(
     """
     logger.info(f"Analyzing book for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
     book = _get_or_create_book(session, project_id)
 
     # 获取所有章节

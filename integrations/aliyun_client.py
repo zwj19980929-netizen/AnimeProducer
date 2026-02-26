@@ -27,32 +27,11 @@ for _key, _value in _original_proxies_for_dashscope.items():
         os.environ[_key] = _value
 
 from config import settings
+from core.proxy_utils import disable_proxy_for_china as _disable_proxy_for_china
+from core.proxy_utils import restore_proxy as _restore_proxy
 from integrations.base_client import BaseImageClient, BaseVideoClient, QuotaExceededError, AuthenticationError
 
 logger = logging.getLogger(__name__)
-
-
-def _disable_proxy_for_china():
-    """国内 API 调用时禁用代理"""
-    # 保存原始代理设置
-    original_proxies = {
-        'HTTP_PROXY': os.environ.get('HTTP_PROXY'),
-        'HTTPS_PROXY': os.environ.get('HTTPS_PROXY'),
-        'http_proxy': os.environ.get('http_proxy'),
-        'https_proxy': os.environ.get('https_proxy'),
-    }
-    # 清除代理
-    for key in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
-        if key in os.environ:
-            del os.environ[key]
-    return original_proxies
-
-
-def _restore_proxy(original_proxies: dict):
-    """恢复原始代理设置"""
-    for key, value in original_proxies.items():
-        if value is not None:
-            os.environ[key] = value
 
 
 class AliyunWanxImageClient(BaseImageClient):

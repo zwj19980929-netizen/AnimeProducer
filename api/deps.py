@@ -1,15 +1,41 @@
 """Dependency injection for API routes."""
 
 import logging
+import re
 from collections.abc import Generator
 from typing import Annotated
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, status
 from sqlmodel import Session
 
 from core.database import engine
+from core.models import Project
 
 logger = logging.getLogger(__name__)
+
+# Path segment validation pattern: only allow safe characters
+_SAFE_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def sanitize_path_segment(value: str) -> str:
+    """Validate that a path segment contains only safe characters.
+
+    Raises ValueError if the value contains path traversal or unsafe characters.
+    """
+    if not value or not _SAFE_SEGMENT_RE.match(value):
+        raise ValueError(f"Invalid path segment: {value!r}")
+    return value
+
+
+def get_project_or_404(session: Session, project_id: str) -> Project:
+    """Get a project by ID or raise 404."""
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project not found: {project_id}",
+        )
+    return project
 
 
 def get_db() -> Generator[Session, None, None]:

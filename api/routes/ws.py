@@ -2,10 +2,12 @@
 
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlmodel import Session
 
+from api.auth import decode_token
 from api.websocket import manager
+from config import settings
 from core.database import engine
 from core.models import Job, Project
 
@@ -13,8 +15,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _authenticate_ws(websocket: WebSocket, token: str | None) -> bool:
+    """Authenticate WebSocket connection. Returns True if allowed."""
+    if getattr(settings, 'AUTH_DISABLED', True):
+        return True
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
+        return False
+    token_data = decode_token(token)
+    if token_data is None:
+        await websocket.close(code=4001, reason="Invalid token")
+        return False
+    return True
+
+
 @router.websocket("/projects/{project_id}")
-async def websocket_project(websocket: WebSocket, project_id: str):
+async def websocket_project(websocket: WebSocket, project_id: str, token: str | None = Query(default=None)):
     """WebSocket endpoint for real-time project updates.
 
     Clients receive updates when:
@@ -22,6 +38,9 @@ async def websocket_project(websocket: WebSocket, project_id: str):
     - Job status changes for this project
     - Shot render progress updates
     """
+    if not await _authenticate_ws(websocket, token):
+        return
+
     # Verify project exists
     with Session(engine) as session:
         project = session.get(Project, project_id)
@@ -62,7 +81,7 @@ async def websocket_project(websocket: WebSocket, project_id: str):
 
 
 @router.websocket("/jobs/{job_id}")
-async def websocket_job(websocket: WebSocket, job_id: str):
+async def websocket_job(websocket: WebSocket, job_id: str, token: str | None = Query(default=None)):
     """WebSocket endpoint for real-time job updates.
 
     Clients receive updates when:
@@ -70,6 +89,9 @@ async def websocket_job(websocket: WebSocket, job_id: str):
     - Job progress updates
     - Shot render updates for this job
     """
+    if not await _authenticate_ws(websocket, token):
+        return
+
     # Verify job exists
     with Session(engine) as session:
         job = session.get(Job, job_id)

@@ -4,10 +4,11 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel import func, select
 
-from api.deps import DBSession
+from api.auth import get_current_active_user
+from api.deps import DBSession, get_project_or_404
 from api.schemas import (
     ChapterBatchAnalysisResponse,
     ChapterBatchCreate,
@@ -21,18 +22,7 @@ from api.schemas import (
 from core.models import Chapter, ChapterStatus, Project, Book, BookUploadStatus
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
-
-
-def _get_project_or_404(session: DBSession, project_id: str) -> Project:
-    """获取项目，不存在则抛出 404。"""
-    project = session.get(Project, project_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project not found: {project_id}",
-        )
-    return project
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 
 def _update_book_stats(session: DBSession, project_id: str) -> None:
@@ -80,7 +70,7 @@ def create_chapter(
     """上传单个章节。"""
     logger.info(f"Creating chapter {chapter_in.chapter_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查章节号是否已存在
     existing = session.exec(
@@ -134,7 +124,7 @@ def create_chapters_batch(
     """批量上传章节。"""
     logger.info(f"Batch creating {len(batch_in.chapters)} chapters for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 检查章节号是否有重复
     chapter_numbers = [ch.chapter_number for ch in batch_in.chapters]
@@ -207,7 +197,7 @@ def list_chapters(
     """列出项目所有章节（分页）。"""
     logger.debug(f"Listing chapters for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     query = select(Chapter).where(Chapter.project_id == project_id)
     count_query = select(func.count()).select_from(Chapter).where(Chapter.project_id == project_id)
@@ -243,7 +233,7 @@ def get_chapter(
     """获取单个章节详情。"""
     logger.debug(f"Getting chapter {chapter_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     chapter = session.exec(
         select(Chapter).where(
@@ -291,7 +281,7 @@ def update_chapter(
     """更新章节内容。"""
     logger.info(f"Updating chapter {chapter_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     chapter = session.exec(
         select(Chapter).where(
@@ -348,7 +338,7 @@ def delete_chapter(
     """删除章节。"""
     logger.info(f"Deleting chapter {chapter_number} from project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     chapter = session.exec(
         select(Chapter).where(
@@ -386,7 +376,7 @@ def analyze_chapter(
     """分析单个章节。"""
     logger.info(f"Analyzing chapter {chapter_number} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     chapter = session.exec(
         select(Chapter).where(
@@ -469,7 +459,7 @@ def analyze_all_chapters(
     """分析项目所有章节。"""
     logger.info(f"Analyzing all chapters for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     # 获取所有章节
     query = select(Chapter).where(Chapter.project_id == project_id)
@@ -560,7 +550,7 @@ def extract_characters_from_chapters(
     """
     logger.info(f"Extracting characters from chapters {chapter_numbers} for project: {project_id}")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     if len(chapter_numbers) > 10:
         raise HTTPException(
@@ -626,7 +616,7 @@ def merge_characters(
     """
     logger.info(f"Merging character '{secondary_character_id}' into '{primary_character_id}'")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     from core.asset_manager import asset_manager
     from core.models import Character
@@ -694,7 +684,7 @@ def add_character_alias(
     """为角色添加别名。"""
     logger.info(f"Adding alias '{alias}' to character '{character_id}'")
 
-    _get_project_or_404(session, project_id)
+    get_project_or_404(session, project_id)
 
     from core.asset_manager import asset_manager
     from core.models import Character

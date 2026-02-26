@@ -16,7 +16,9 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 # Security configuration
-SECRET_KEY = getattr(settings, 'SECRET_KEY', secrets.token_urlsafe(32))
+SECRET_KEY = settings.SECRET_KEY or secrets.token_urlsafe(32)
+if not settings.SECRET_KEY:
+    logger.warning("SECRET_KEY not configured — using auto-generated key. Sessions will not survive restarts.")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = getattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES', 60 * 24)  # 24 hours
 

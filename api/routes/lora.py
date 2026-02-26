@@ -11,17 +11,18 @@ LoRA API Routes - LoRA 训练管理 API
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlmodel import Session
 
+from api.auth import get_current_active_user
 from api.deps import get_db
 from core.lora_manager import lora_manager
 from core.models import CharacterLoRA, LoRATrainingStatus, Character, Job, JobType, JobStatus
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["LoRA Training"])
+router = APIRouter(tags=["LoRA Training"], dependencies=[Depends(get_current_active_user)])
 
 
 # ============================================================================
@@ -226,8 +227,8 @@ async def check_training_status(
             lora_url=lora.lora_url,
             error_message=lora.error_message
         )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LoRA not found")
 
 
 @router.get("/character/{character_id}", response_model=List[LoRAResponse])
@@ -261,5 +262,5 @@ async def cancel_training(
     try:
         success = lora_manager.cancel_training(lora_id, session=db)
         return {"success": success, "message": "Training cancelled" if success else "Cannot cancel"}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LoRA not found")

@@ -4,9 +4,10 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, status, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
 from sqlmodel import func, select
 
+from api.auth import get_current_active_user
 from api.deps import DBSession, DirectorDep
 from api.schemas import (
     ErrorResponse,
@@ -24,7 +25,7 @@ from core.errors import ProjectNotFoundError
 from core.models import Project, ProjectStatus, Shot, Job, Chapter, ChapterStatus, ShotRender, Character, CharacterState, Episode, Book
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_active_user)])
 
 
 @router.post(
@@ -326,10 +327,10 @@ def build_project_assets(
         updated_project = director.director.build_assets(project_id)
         return updated_project
     except Exception as e:
-        logger.error(f"Asset build failed: {e}")
+        logger.error(f"Asset build failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Asset build failed",
         )
 
 
@@ -352,10 +353,10 @@ def build_project_assets_from_chapters(
         updated_project = director.director.build_assets_from_chapters(project_id)
         return updated_project
     except Exception as e:
-        logger.error(f"Asset build from chapters failed: {e}")
+        logger.error(f"Asset build from chapters failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Asset build from chapters failed",
         )
 
 
@@ -380,10 +381,10 @@ def generate_project_storyboard(
             total=len(shots),
         )
     except Exception as e:
-        logger.error(f"Storyboard generation failed: {e}")
+        logger.error(f"Storyboard generation failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Storyboard generation failed",
         )
 
 
@@ -413,10 +414,10 @@ def start_pipeline(
             message="Pipeline started successfully via Celery",
         )
     except Exception as e:
-        logger.error(f"Pipeline start failed: {e}")
+        logger.error(f"Pipeline start failed: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+            detail="Pipeline start failed",
         )
 
 

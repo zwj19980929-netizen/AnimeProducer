@@ -1,13 +1,18 @@
+import re
 from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_SAFE_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
 class Settings(BaseSettings):
     # Core Settings
     PROJECT_NAME: str = "AnimeMatrix"
-    DEBUG: bool = True
+    DEBUG: bool = False
     API_VERSION: str = "v1"
     LOG_LEVEL: str = "INFO"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
 
     # Authentication Settings
     AUTH_DISABLED: bool = True  # Set to False to enable authentication
@@ -186,11 +191,20 @@ class Settings(BaseSettings):
 
     def get_project_dir(self, project_id: str) -> Path:
         """Get the directory for a specific project."""
-        return self.PROJECTS_DIR / project_id
+        if not _SAFE_SEGMENT_RE.match(project_id):
+            raise ValueError(f"Invalid project_id: {project_id!r}")
+        result = self.PROJECTS_DIR / project_id
+        result.resolve().relative_to(self.PROJECTS_DIR.resolve())
+        return result
 
     def get_character_dir(self, project_id: str, character_id: str) -> Path:
         """Get the directory for a specific character."""
-        return self.get_project_dir(project_id) / "characters" / character_id
+        if not _SAFE_SEGMENT_RE.match(character_id):
+            raise ValueError(f"Invalid character_id: {character_id!r}")
+        project_dir = self.get_project_dir(project_id)
+        result = project_dir / "characters" / character_id
+        result.resolve().relative_to(self.PROJECTS_DIR.resolve())
+        return result
 
     def ensure_dirs(self) -> None:
         """Ensure all required directories exist."""

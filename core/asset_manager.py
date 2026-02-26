@@ -115,9 +115,13 @@ class AssetManager:
         logger.info(f"AssetManager initialized with base_assets_dir: {self.base_assets_dir}")
 
     def _get_project_dir(self, project_id: str) -> Path:
+        from api.deps import sanitize_path_segment
+        sanitize_path_segment(project_id)
         return self.base_assets_dir / "projects" / project_id
 
     def _get_character_dir(self, project_id: str, character_id: str) -> Path:
+        from api.deps import sanitize_path_segment
+        sanitize_path_segment(character_id)
         return self._get_project_dir(project_id) / "characters" / character_id
 
     def _ensure_dir(self, path: Path) -> None:
