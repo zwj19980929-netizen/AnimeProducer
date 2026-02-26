@@ -4,10 +4,10 @@ import asyncio
 import json
 import logging
 from typing import Dict, Set
-from contextlib import asynccontextmanager
 
 from fastapi import WebSocket, WebSocketDisconnect
 import redis.asyncio as aioredis
+import redis
 
 from config import settings
 from core.metrics import record_websocket_connect, record_websocket_disconnect, record_websocket_message
@@ -201,6 +201,21 @@ class ConnectionManager:
 # Global connection manager instance
 manager = ConnectionManager()
 
+_sync_redis_client: redis.Redis | None = None
+
+
+def _get_sync_redis() -> redis.Redis:
+    """Get or create a reusable sync Redis client for publish calls."""
+    global _sync_redis_client
+    if _sync_redis_client is None:
+        _sync_redis_client = redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+    return _sync_redis_client
+
 
 async def publish_job_update(job_id: str, project_id: str, data: dict):
     """Publish a job update to Redis for broadcasting."""
@@ -243,9 +258,9 @@ async def publish_project_update(project_id: str, data: dict):
 
 def publish_job_update_sync(job_id: str, project_id: str, data: dict):
     """Synchronous version of publish_job_update for use in Celery tasks."""
-    import redis
+    global _sync_redis_client
     try:
-        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        r = _get_sync_redis()
         payload = {
             "type": "job_update",
             "job_id": job_id,
@@ -253,16 +268,16 @@ def publish_job_update_sync(job_id: str, project_id: str, data: dict):
             **data
         }
         r.publish(f"job:{job_id}:status", json.dumps(payload))
-        r.close()
     except Exception as e:
+        _sync_redis_client = None
         logger.error(f"Failed to publish job update (sync): {e}")
 
 
 def publish_shot_render_update_sync(render_id: str, job_id: str, project_id: str, data: dict):
     """Publish shot render update synchronously."""
-    import redis
+    global _sync_redis_client
     try:
-        r = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        r = _get_sync_redis()
         payload = {
             "type": "shot_render_update",
             "render_id": render_id,
@@ -271,6 +286,6 @@ def publish_shot_render_update_sync(render_id: str, job_id: str, project_id: str
             **data
         }
         r.publish(f"job:{job_id}:status", json.dumps(payload))
-        r.close()
     except Exception as e:
+        _sync_redis_client = None
         logger.error(f"Failed to publish shot render update (sync): {e}")

@@ -9,7 +9,6 @@ from sqlmodel import Session, select
 from core.database import engine
 from core.models import Shot, Project, ProjectStatus, Job, JobStatus, JobType, Episode, EpisodeStatus, Chapter, ChapterStatus
 from core.editor import assemble_shots, ShotArtifact, AlignmentStrategy
-from core.cache import cache
 from tasks.celery_app import celery_app
 from api.websocket import publish_job_update_sync
 
@@ -17,25 +16,30 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="tasks.jobs.render_project_job", task_acks_late=False)
-def render_project_job(self, project_id: str):
+def render_project_job(self, project_id: str, job_id: str):
     """编排整个项目的渲染任务。"""
-    logger.info(f"Dispatching render job for project: {project_id}")
+    logger.info(f"Dispatching render job for project: {project_id}, job: {job_id}")
 
-    job_id = None
     with Session(engine) as session:
-        job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
-        if job:
-            job.status = JobStatus.STARTED
-            job.started_at = datetime.utcnow()
-            job_id = job.id
-            session.add(job)
-            session.commit()
+        job = session.get(Job, job_id)
+        if not job or job.project_id != project_id:
+            logger.error(f"Job not found or mismatched. project_id={project_id}, job_id={job_id}")
+            return {"status": "failed", "reason": "Job not found"}
 
-            # Publish WebSocket update
-            publish_job_update_sync(job_id, project_id, {
-                "status": JobStatus.STARTED.value,
-                "progress": 0.0,
-            })
+        if job.status == JobStatus.REVOKED:
+            logger.info(f"Render dispatch skipped - job was cancelled: {job_id}")
+            return {"status": "cancelled", "reason": "Job was cancelled"}
+
+        job.status = JobStatus.STARTED
+        job.started_at = datetime.utcnow()
+        session.add(job)
+        session.commit()
+
+        # Publish WebSocket update
+        publish_job_update_sync(job_id, project_id, {
+            "status": JobStatus.STARTED.value,
+            "progress": 0.0,
+        })
 
         shots = session.exec(select(Shot).where(Shot.project_id == project_id).order_by(Shot.sequence_order)).all()
         shot_ids = [shot.shot_id for shot in shots]
@@ -43,7 +47,7 @@ def render_project_job(self, project_id: str):
     if not shot_ids:
         logger.warning("No shots found!")
         with Session(engine) as session:
-            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = "No shots found for rendering"
@@ -67,22 +71,33 @@ def render_project_job(self, project_id: str):
 
     from tasks.shots import render_shot
 
-    header = [render_shot.s(sid) for sid in shot_ids]
-    callback = compose_project.s(project_id)
+    header = [render_shot.s(sid, job_id) for sid in shot_ids]
+    callback = compose_project.s(project_id, job_id)
 
     workflow = chord(header)(callback)
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job:
+            result = dict(job.result or {})
+            if job.celery_task_id and job.celery_task_id != workflow.id:
+                result["root_task_id"] = job.celery_task_id
+            result["chord_id"] = workflow.id
+            job.result = result
+            job.celery_task_id = workflow.id
+            session.add(job)
+            session.commit()
     logger.info(f"Workflow started. Chord ID: {workflow.id}")
     return {"chord_id": workflow.id}
 
 
 @celery_app.task(bind=True, name="tasks.jobs.compose_project", task_acks_late=False)
-def compose_project(self, shot_results: List[Dict], project_id: str):
+def compose_project(self, shot_results: List[Dict], project_id: str, job_id: str):
     """最终合成任务：收集所有 Shot 结果并拼接。"""
-    logger.info(f"Composing project: {project_id}")
+    logger.info(f"Composing project: {project_id}, job: {job_id}")
 
     # Check if job was cancelled
     with Session(engine) as session:
-        job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+        job = session.get(Job, job_id)
         if job and job.status == JobStatus.REVOKED:
             logger.info(f"Composition skipped - job was cancelled for project: {project_id}")
             return {"status": "cancelled", "reason": "Job was cancelled"}
@@ -98,7 +113,7 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 project.error_message = "All shots failed to render"
                 session.add(project)
 
-            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = "All shots failed to render"
@@ -166,7 +181,7 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 project.output_video_url = output_video_url
                 session.add(project)
 
-            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.SUCCESS
                 job.progress = 1.0
@@ -195,7 +210,7 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
                 project.error_message = str(e)
                 session.add(project)
 
-            job = session.query(Job).filter(Job.project_id == project_id).order_by(Job.created_at.desc()).first()
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = str(e)
@@ -213,11 +228,20 @@ def compose_project(self, shot_results: List[Dict], project_id: str):
 
 
 @celery_app.task(bind=True, name="tasks.jobs.render_episode_job", task_acks_late=False)
-def render_episode_job(self, project_id: str, episode_id: str):
+def render_episode_job(self, project_id: str, episode_id: str, job_id: str):
     """编排单集的渲染任务。"""
-    logger.info(f"Dispatching render job for episode: {episode_id} in project: {project_id}")
+    logger.info(f"Dispatching render job for episode: {episode_id} in project: {project_id}, job: {job_id}")
 
     with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if not job or job.project_id != project_id:
+            logger.error(f"Job not found or mismatched. project_id={project_id}, job_id={job_id}")
+            return {"status": "failed", "reason": "Job not found"}
+
+        if job.status == JobStatus.REVOKED:
+            logger.info(f"Episode render dispatch skipped - job was cancelled: {job_id}")
+            return {"status": "cancelled", "reason": "Job was cancelled"}
+
         # 获取集信息
         episode = session.get(Episode, episode_id)
         if not episode:
@@ -225,16 +249,10 @@ def render_episode_job(self, project_id: str, episode_id: str):
             return {"status": "failed", "reason": "Episode not found"}
 
         # 更新任务状态
-        job = session.query(Job).filter(
-            Job.project_id == project_id,
-            Job.result.contains({"episode_id": episode_id})
-        ).order_by(Job.created_at.desc()).first()
-
-        if job:
-            job.status = JobStatus.STARTED
-            job.started_at = datetime.utcnow()
-            session.add(job)
-            session.commit()
+        job.status = JobStatus.STARTED
+        job.started_at = datetime.utcnow()
+        session.add(job)
+        session.commit()
 
         # 获取该集的分镜
         shots = session.exec(
@@ -250,11 +268,7 @@ def render_episode_job(self, project_id: str, episode_id: str):
                 episode.status = EpisodeStatus.FAILED
                 session.add(episode)
 
-            job = session.query(Job).filter(
-                Job.project_id == project_id,
-                Job.result.contains({"episode_id": episode_id})
-            ).order_by(Job.created_at.desc()).first()
-
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = "No shots found for rendering"
@@ -266,25 +280,33 @@ def render_episode_job(self, project_id: str, episode_id: str):
 
     from tasks.shots import render_shot
 
-    header = [render_shot.s(sid) for sid in shot_ids]
-    callback = compose_episode.s(project_id, episode_id)
+    header = [render_shot.s(sid, job_id) for sid in shot_ids]
+    callback = compose_episode.s(project_id, episode_id, job_id)
 
     workflow = chord(header)(callback)
+    with Session(engine) as session:
+        job = session.get(Job, job_id)
+        if job:
+            result = dict(job.result or {})
+            if job.celery_task_id and job.celery_task_id != workflow.id:
+                result["root_task_id"] = job.celery_task_id
+            result["chord_id"] = workflow.id
+            job.result = result
+            job.celery_task_id = workflow.id
+            session.add(job)
+            session.commit()
     logger.info(f"Episode workflow started. Chord ID: {workflow.id}")
     return {"chord_id": workflow.id, "episode_id": episode_id}
 
 
 @celery_app.task(bind=True, name="tasks.jobs.compose_episode", task_acks_late=False)
-def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id: str):
+def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id: str, job_id: str):
     """单集合成任务：收集所有 Shot 结果并拼接为一集视频。"""
-    logger.info(f"Composing episode: {episode_id} for project: {project_id}")
+    logger.info(f"Composing episode: {episode_id} for project: {project_id}, job: {job_id}")
 
     # 检查任务是否被取消
     with Session(engine) as session:
-        job = session.query(Job).filter(
-            Job.project_id == project_id,
-            Job.result.contains({"episode_id": episode_id})
-        ).order_by(Job.created_at.desc()).first()
+        job = session.get(Job, job_id)
 
         if job and job.status == JobStatus.REVOKED:
             logger.info(f"Composition skipped - job was cancelled for episode: {episode_id}")
@@ -303,11 +325,7 @@ def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id:
                 episode.status = EpisodeStatus.FAILED
                 session.add(episode)
 
-            job = session.query(Job).filter(
-                Job.project_id == project_id,
-                Job.result.contains({"episode_id": episode_id})
-            ).order_by(Job.created_at.desc()).first()
-
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = "All shots failed to render"
@@ -374,11 +392,7 @@ def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id:
                 episode.updated_at = datetime.utcnow()
                 session.add(episode)
 
-            job = session.query(Job).filter(
-                Job.project_id == project_id,
-                Job.result.contains({"episode_id": episode_id})
-            ).order_by(Job.created_at.desc()).first()
-
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.SUCCESS
                 job.progress = 1.0
@@ -404,11 +418,7 @@ def compose_episode(self, shot_results: List[Dict], project_id: str, episode_id:
                 episode.status = EpisodeStatus.FAILED
                 session.add(episode)
 
-            job = session.query(Job).filter(
-                Job.project_id == project_id,
-                Job.result.contains({"episode_id": episode_id})
-            ).order_by(Job.created_at.desc()).first()
-
+            job = session.get(Job, job_id)
             if job:
                 job.status = JobStatus.FAILURE
                 job.error_message = str(e)

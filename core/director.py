@@ -164,6 +164,18 @@ class Director:
         if not project:
             raise ProjectNotFoundError(f"Project not found: {project_id}")
 
+        active_job = self.session.exec(
+            select(Job).where(
+                Job.project_id == project_id,
+                Job.job_type == JobType.FULL_PIPELINE,
+                Job.status.in_([JobStatus.PENDING, JobStatus.STARTED])
+            ).order_by(Job.created_at.desc())
+        ).first()
+        if active_job:
+            raise InvalidProjectStateError(
+                f"Project {project_id} already has an active render job: {active_job.id}"
+            )
+
         shots = self.session.exec(
             select(Shot).where(Shot.project_id == project_id).order_by(Shot.sequence_order)
         ).all()
@@ -211,7 +223,10 @@ class Director:
         self.session.commit()
 
         from tasks.jobs import render_project_job
-        render_project_job.delay(project_id)
+        task_result = render_project_job.delay(project_id, job.id)
+        job.celery_task_id = task_result.id
+        self.session.add(job)
+        self.session.commit()
 
         logger.info(f"Started render job {job.id} for project {project_id}")
         return job
@@ -356,6 +371,19 @@ class Director:
                 f"Episode {episode_number} has no storyboard. Call generate_episode_storyboard first."
             )
 
+        active_job = self.session.exec(
+            select(Job).where(
+                Job.project_id == project_id,
+                Job.job_type == JobType.FULL_PIPELINE,
+                Job.status.in_([JobStatus.PENDING, JobStatus.STARTED]),
+                Job.result.contains({"episode_id": episode.id})
+            ).order_by(Job.created_at.desc())
+        ).first()
+        if active_job:
+            raise InvalidProjectStateError(
+                f"Episode {episode_number} already has an active render job: {active_job.id}"
+            )
+
         # 创建任务
         job = Job(
             project_id=project_id,
@@ -399,7 +427,10 @@ class Director:
 
         # 触发 Celery 任务
         from tasks.jobs import render_episode_job
-        render_episode_job.delay(project_id, episode.id)
+        task_result = render_episode_job.delay(project_id, episode.id, job.id)
+        job.celery_task_id = task_result.id
+        self.session.add(job)
+        self.session.commit()
 
         logger.info(f"Started render job {job.id} for episode {episode_number}")
         return job

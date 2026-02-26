@@ -1,6 +1,7 @@
 """Job status and management API routes."""
 
 import logging
+import sys
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -19,6 +20,7 @@ from api.schemas import (
     ShotRenderResponse,
 )
 from core.models import Job, JobStatus, JobType, Project, ProjectStatus, ShotRender, ShotRenderStatus
+from tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(get_current_active_user)])
@@ -220,9 +222,26 @@ def cancel_job(
             detail=f"Cannot cancel job in status: {job.status}",
         )
     
-    # TODO: Actually revoke Celery task
-    # if job.celery_task_id:
-    #     celery_app.control.revoke(job.celery_task_id, terminate=True)
+    task_ids: set[str] = set()
+    if job.celery_task_id:
+        task_ids.add(job.celery_task_id)
+    if isinstance(job.result, dict):
+        for key in ("root_task_id", "chord_id"):
+            task_id = job.result.get(key)
+            if isinstance(task_id, str) and task_id:
+                task_ids.add(task_id)
+
+    terminate_supported = sys.platform != "win32"
+    for task_id in task_ids:
+        try:
+            revoke_kwargs = {"terminate": terminate_supported}
+            if terminate_supported:
+                revoke_kwargs["signal"] = "SIGTERM"
+            celery_app.control.revoke(task_id, **revoke_kwargs)
+            logger.info(f"Revoke sent for Celery task {task_id} (terminate={terminate_supported})")
+        except Exception as e:
+            # 保持兼容：即便 revoke 失败，也通过 DB 状态触发协作式取消
+            logger.warning(f"Failed to revoke Celery task {task_id}: {e}")
 
     job.status = JobStatus.REVOKED
     job.completed_at = datetime.utcnow()

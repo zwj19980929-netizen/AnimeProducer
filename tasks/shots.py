@@ -222,7 +222,7 @@ def extract_last_frame(video_path: str, shot_id: int) -> Optional[str]:
 
 
 @celery_app.task(bind=True, name="tasks.shots.render_shot")
-def render_shot(self, shot_id: int):
+def render_shot(self, shot_id: int, job_id: str | None = None):
     """
     执行镜头渲染流水线。
 
@@ -247,11 +247,6 @@ def render_shot(self, shot_id: int):
 
         project_id = shot.project_id
 
-        # Check if job was cancelled before starting
-        if is_job_cancelled(project_id):
-            logger.info(f"Shot {shot_id} skipped - job was cancelled")
-            return {"status": "cancelled", "shot_id": shot_id}
-
         shot_data = {
             "shot_id": shot.shot_id,
             "visual_prompt": shot.visual_prompt,
@@ -267,9 +262,22 @@ def render_shot(self, shot_id: int):
 
         reference_image_path = get_reference_image_for_shot(shot, session)
 
-        render_record = session.query(ShotRender).filter(ShotRender.shot_id == shot_id).first()
+        render_query = session.query(ShotRender).filter(ShotRender.shot_id == shot_id)
+        if job_id:
+            render_query = render_query.filter(ShotRender.job_id == job_id)
+        render_record = render_query.first()
         render_id = render_record.id if render_record else None
-        job_id = render_record.job_id if render_record else None
+        current_job_id = render_record.job_id if render_record else job_id
+
+        # Check if job was cancelled before starting
+        if current_job_id:
+            job = session.get(Job, current_job_id)
+            if job and job.status == JobStatus.REVOKED:
+                logger.info(f"Shot {shot_id} skipped - job was cancelled: {current_job_id}")
+                return {"status": "cancelled", "shot_id": shot_id}
+        elif is_job_cancelled(project_id):
+            logger.info(f"Shot {shot_id} skipped - project latest job was cancelled")
+            return {"status": "cancelled", "shot_id": shot_id}
 
         # Step 1: 获取角色 LoRA
         lora_url = None
@@ -288,7 +296,7 @@ def render_shot(self, shot_id: int):
     if render_id:
         update_render_status(
             render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1,
-            project_id=project_id, job_id=job_id
+            project_id=project_id, job_id=current_job_id
         )
 
     try:
@@ -356,7 +364,7 @@ def render_shot(self, shot_id: int):
                     update_render_status(
                         render_id, ShotRenderStatus.GENERATING_IMAGE, 0.1 + (retry_count * 0.1),
                         error=f"Re-generating (attempt {retry_count + 1})...",
-                        project_id=project_id, job_id=job_id
+                        project_id=project_id, job_id=current_job_id
                     )
 
                 # 重新生成视频（不重新生成音频）
@@ -387,7 +395,7 @@ def render_shot(self, shot_id: int):
                 update_render_status(
                     render_id, ShotRenderStatus.GENERATING_VIDEO, 0.7,
                     error="Lip-Syncing...",
-                    project_id=project_id, job_id=job_id
+                    project_id=project_id, job_id=current_job_id
                 )
             try:
                 logger.info(f"Applying lip-sync for shot {shot_id}...")
@@ -409,7 +417,7 @@ def render_shot(self, shot_id: int):
                 update_render_status(
                     render_id, ShotRenderStatus.GENERATING_AUDIO, 0.9,
                     error="Generating SFX...",
-                    project_id=project_id, job_id=job_id
+                    project_id=project_id, job_id=current_job_id
                 )
             try:
                 logger.info(f"Generating SFX for shot {shot_id} with tags: {sfx_tags}")
@@ -435,7 +443,7 @@ def render_shot(self, shot_id: int):
         if render_id:
             update_render_status(
                 render_id, ShotRenderStatus.SUCCESS, 1.0, result_paths,
-                project_id=project_id, job_id=job_id
+                project_id=project_id, job_id=current_job_id
             )
 
         duration = (datetime.utcnow() - start_time).total_seconds()
@@ -456,6 +464,6 @@ def render_shot(self, shot_id: int):
         if render_id:
             update_render_status(
                 render_id, ShotRenderStatus.FAILURE, error=str(e),
-                project_id=project_id, job_id=job_id
+                project_id=project_id, job_id=current_job_id
             )
         raise e

@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useProjectStore } from '@/stores/project'
@@ -12,6 +12,8 @@ export function useProject(projectId?: string) {
   const store = useProjectStore()
 
   const pollingIntervalId = ref<number | null>(null)
+  let wsRefreshTimer: number | null = null
+  let wsRefreshInFlight = false
 
   const {
     currentProject: project,
@@ -31,12 +33,28 @@ export function useProject(projectId?: string) {
   // WebSocket connection (will be initialized when startPolling is called)
   let wsConnection: ReturnType<typeof useProjectWebSocket> | null = null
 
+  function scheduleProjectRefresh(): void {
+    if (!project.value?.id || wsRefreshTimer !== null) {
+      return
+    }
+
+    wsRefreshTimer = window.setTimeout(async () => {
+      wsRefreshTimer = null
+      if (!project.value?.id || wsRefreshInFlight) {
+        return
+      }
+      wsRefreshInFlight = true
+      try {
+        await store.fetchProject(project.value.id)
+      } finally {
+        wsRefreshInFlight = false
+      }
+    }, 400)
+  }
+
   function handleWebSocketMessage(msg: WebSocketMessage) {
     if (msg.type === 'project_update' || msg.type === 'job_update') {
-      // Refresh project data when we receive an update
-      if (project.value?.id) {
-        store.fetchProject(project.value.id)
-      }
+      scheduleProjectRefresh()
     }
   }
 
@@ -132,6 +150,10 @@ export function useProject(projectId?: string) {
     if (pollingIntervalId.value !== null) {
       clearInterval(pollingIntervalId.value)
       pollingIntervalId.value = null
+    }
+    if (wsRefreshTimer !== null) {
+      clearTimeout(wsRefreshTimer)
+      wsRefreshTimer = null
     }
     // Stop WebSocket connection
     if (wsConnection) {
