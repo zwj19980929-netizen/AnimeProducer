@@ -26,6 +26,9 @@ CRITIC_ENABLED = getattr(settings, 'CRITIC_ENABLED', True)
 CRITIC_MIN_SCORE = getattr(settings, 'CRITIC_MIN_SCORE', 8)
 CRITIC_MAX_RETRIES = getattr(settings, 'CRITIC_MAX_RETRIES', 2)
 
+# Seedance 相关设置
+SEEDANCE_ENABLED = getattr(settings, 'SEEDANCE_ENABLED', False)
+
 pipeline = ShotPipeline(
     enable_vlm_scoring=True,
     min_vlm_score=0.6
@@ -48,6 +51,32 @@ def get_reference_image_for_shot(shot: Shot, session: Session) -> Optional[str]:
     if character and character.reference_image_path:
         if os.path.exists(character.reference_image_path):
             return character.reference_image_path
+
+    return None
+
+
+def get_character_voice_sample(shot: Shot, session: Session) -> Optional[str]:
+    """获取镜头中角色的音色样本路径（用于 Seedance 模式）。"""
+    if not shot.characters_in_shot:
+        return None
+
+    first_character_id = shot.characters_in_shot[0]
+    character = session.get(Character, first_character_id)
+
+    if character:
+        # 优先使用 voice_sample_path
+        voice_sample = getattr(character, 'voice_sample_path', None)
+        if voice_sample and os.path.exists(voice_sample):
+            return voice_sample
+
+        # 尝试从 VoiceProfileManager 获取
+        try:
+            from core.voice_profile import voice_profile_manager
+            profile = voice_profile_manager.get(first_character_id)
+            if profile and profile.has_sample():
+                return profile.sample_audio_path
+        except Exception as e:
+            logger.debug(f"Failed to get voice profile: {e}")
 
     return None
 
@@ -460,6 +489,222 @@ def render_shot(self, shot_id: int, job_id: str | None = None):
 
     except Exception as e:
         error_msg = f"Pipeline failed: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        if render_id:
+            update_render_status(
+                render_id, ShotRenderStatus.FAILURE, error=str(e),
+                project_id=project_id, job_id=current_job_id
+            )
+        raise e
+
+
+@celery_app.task(bind=True, name="tasks.shots.render_shot_seedance")
+def render_shot_seedance(self, shot_id: int, job_id: str | None = None):
+    """
+    使用 Seedance 2.0 执行镜头渲染（音视频同步生成）。
+
+    与传统流程的区别：
+    - 音视频同时生成，无需后期口型同步
+    - 通过音频参考保持角色音色一致性
+    - 原生支持对白和口型同步
+
+    流程：
+    1. 获取镜头数据和角色参考图
+    2. 获取角色音色样本
+    3. 调用 Seedance 2.0 生成视频+音频
+    4. AI 影评人评分（如启用）
+    5. SFX 音效处理
+    6. 更新渲染状态
+    """
+    logger.info(f"Starting Seedance pipeline for shot: {shot_id}")
+    start_time = datetime.utcnow()
+
+    with Session(engine) as session:
+        shot = session.get(Shot, shot_id)
+        if not shot:
+            logger.error(f"Shot {shot_id} not found!")
+            return {"status": "failed", "error": "Shot not found"}
+
+        project_id = shot.project_id
+
+        shot_data = {
+            "shot_id": shot.shot_id,
+            "visual_prompt": shot.visual_prompt,
+            "dialogue": shot.dialogue,
+            "camera_movement": shot.camera_movement,
+            "duration": shot.duration or settings.SEEDANCE_DEFAULT_DURATION,
+            "project_id": project_id,
+            "scene_description": shot.visual_prompt,
+            "sfx_tags": getattr(shot, 'sfx_tags', None),
+            "characters_in_shot": shot.characters_in_shot,
+            "scene_id": getattr(shot, 'scene_id', None),
+        }
+
+        # 获取角色参考图和音色样本
+        reference_image_path = get_reference_image_for_shot(shot, session)
+        voice_sample_path = get_character_voice_sample(shot, session)
+
+        render_query = session.query(ShotRender).filter(ShotRender.shot_id == shot_id)
+        if job_id:
+            render_query = render_query.filter(ShotRender.job_id == job_id)
+        render_record = render_query.first()
+        render_id = render_record.id if render_record else None
+        current_job_id = render_record.job_id if render_record else job_id
+
+        # 检查任务是否已取消
+        if current_job_id:
+            job = session.get(Job, current_job_id)
+            if job and job.status == JobStatus.REVOKED:
+                logger.info(f"Shot {shot_id} skipped - job was cancelled: {current_job_id}")
+                return {"status": "cancelled", "shot_id": shot_id}
+        elif is_job_cancelled(project_id):
+            logger.info(f"Shot {shot_id} skipped - project latest job was cancelled")
+            return {"status": "cancelled", "shot_id": shot_id}
+
+    if render_id:
+        update_render_status(
+            render_id, ShotRenderStatus.GENERATING_VIDEO, 0.1,
+            project_id=project_id, job_id=current_job_id
+        )
+
+    try:
+        from integrations.seedance_client import get_seedance_client
+
+        # 获取 Seedance 客户端
+        seedance_client = get_seedance_client()
+
+        # 构建完整 prompt
+        prompt_parts = [shot_data["visual_prompt"]]
+        if shot_data["camera_movement"]:
+            prompt_parts.append(f"镜头运动：{shot_data['camera_movement']}")
+
+        full_prompt = "\n".join(prompt_parts)
+
+        logger.info(f"Calling Seedance for shot {shot_id}...")
+        logger.debug(f"Prompt: {full_prompt[:200]}...")
+        logger.debug(f"Reference image: {reference_image_path}")
+        logger.debug(f"Voice sample: {voice_sample_path}")
+
+        # 调用 Seedance 生成
+        result = seedance_client.generate_shot_with_voice(
+            prompt=full_prompt,
+            character_image=reference_image_path,
+            voice_sample=voice_sample_path,
+            dialogue=shot_data["dialogue"],
+            duration=int(shot_data["duration"]),
+            resolution=settings.SEEDANCE_DEFAULT_RESOLUTION,
+            audio_language=settings.SEEDANCE_AUDIO_LANGUAGE
+        )
+
+        # 保存结果
+        output_dir = settings.get_project_dir(project_id) / "renders"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        video_path = str(output_dir / f"shot_{shot_id}.mp4")
+
+        # 如果返回的是 video_data，直接写入；否则从 video_url 下载
+        if result.video_data:
+            with open(video_path, "wb") as f:
+                f.write(result.video_data)
+        elif result.video_url:
+            import requests
+            resp = requests.get(result.video_url, timeout=120)
+            resp.raise_for_status()
+            with open(video_path, "wb") as f:
+                f.write(resp.content)
+        else:
+            raise RuntimeError("Seedance 未返回视频数据")
+
+        # Seedance 1.5 Pro 的音频内嵌在视频中，无需单独保存
+        # 但为了兼容后续流程，提取音频轨道
+        audio_path = None
+        try:
+            from moviepy import VideoFileClip
+            clip = VideoFileClip(video_path)
+            if clip.audio:
+                audio_path = str(output_dir / f"shot_{shot_id}_audio.mp3")
+                clip.audio.write_audiofile(audio_path, logger=None)
+            clip.close()
+        except Exception as e:
+            logger.warning(f"提取音频失败: {e}")
+
+        current_video = video_path
+        current_audio = audio_path
+        video_duration = result.duration or shot_data["duration"]
+
+        if render_id:
+            update_render_status(
+                render_id, ShotRenderStatus.GENERATING_VIDEO, 0.6,
+                project_id=project_id, job_id=current_job_id
+            )
+
+        # AI 影评人评分（可选）
+        if CRITIC_ENABLED:
+            try:
+                critic = get_video_critic()
+                review = critic.evaluate_shot(
+                    video_path=current_video,
+                    original_prompt=full_prompt,
+                    characters=shot_data.get("characters_in_shot"),
+                )
+                logger.info(
+                    f"Critic Score: {review.score}/10 - "
+                    f"has_glitches={review.has_glitches} - {review.feedback}"
+                )
+                # Seedance 模式下暂不支持重绘，仅记录评分
+            except Exception as e:
+                logger.error(f"Critic evaluation failed: {e}")
+
+        # SFX 音效处理
+        sfx_tags = shot_data.get("sfx_tags")
+        if sfx_tags and current_audio:
+            if render_id:
+                update_render_status(
+                    render_id, ShotRenderStatus.GENERATING_AUDIO, 0.8,
+                    error="Generating SFX...",
+                    project_id=project_id, job_id=current_job_id
+                )
+            try:
+                logger.info(f"Generating SFX for shot {shot_id} with tags: {sfx_tags}")
+                sfx_list = sfx_generator.generate_sfx_for_shot(
+                    scene_description=shot_data["scene_description"],
+                    shot_duration=video_duration,
+                    sfx_tags=sfx_tags
+                )
+                if sfx_list:
+                    layers = [SFXLayer(audio_path=sfx.audio_path, volume=0.3) for sfx in sfx_list]
+                    current_audio = sfx_mixer.mix_with_dialogue(current_audio, layers)
+                    logger.info(f"SFX mixed for shot {shot_id}")
+            except Exception as e:
+                logger.error(f"SFX generation failed for shot {shot_id}: {e}")
+
+        # 最终结果
+        result_paths = {
+            "video": current_video,
+            "audio": current_audio
+        }
+
+        if render_id:
+            update_render_status(
+                render_id, ShotRenderStatus.SUCCESS, 1.0, result_paths,
+                project_id=project_id, job_id=current_job_id
+            )
+
+        duration = (datetime.utcnow() - start_time).total_seconds()
+        logger.info(f"Shot {shot_id} (Seedance) finished in {duration:.2f}s. Video: {current_video}")
+
+        return {
+            "shot_id": shot_id,
+            "status": "completed",
+            "video_path": current_video,
+            "audio_path": current_audio,
+            "duration": video_duration,
+            "dialogue": shot_data["dialogue"],
+            "mode": "seedance"
+        }
+
+    except Exception as e:
+        error_msg = f"Seedance pipeline failed: {str(e)}\n{traceback.format_exc()}"
         logger.error(error_msg)
         if render_id:
             update_render_status(

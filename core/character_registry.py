@@ -29,6 +29,9 @@ class CharacterAsset:
     face_embedding: Optional[Any] = None                 # 人脸特征向量 (用于一致性验证)
     metadata: Dict[str, Any] = field(default_factory=dict)     # 其他元数据
     aliases: List[str] = field(default_factory=list)     # 角色别名列表（用于消歧）
+    # Seedance 2.0 音色支持
+    voice_sample_path: Optional[str] = None              # 音色样本路径（用于 Seedance 音频参考）
+    voice_tts_provider: Optional[str] = None             # 音色样本的 TTS 提供商
 
     def get_primary_reference(self) -> Optional[str]:
         """获取主参考图"""
@@ -43,6 +46,17 @@ class CharacterAsset:
     def get_negative_tags(self) -> str:
         """获取负面标签字符串"""
         return ", ".join(self.negative_tags) if self.negative_tags else ""
+
+    def get_voice_sample(self) -> Optional[bytes]:
+        """获取音色样本数据"""
+        if self.voice_sample_path and os.path.exists(self.voice_sample_path):
+            with open(self.voice_sample_path, "rb") as f:
+                return f.read()
+        return None
+
+    def has_voice_sample(self) -> bool:
+        """是否有音色样本"""
+        return self.voice_sample_path is not None and os.path.exists(self.voice_sample_path)
 
 
 class CharacterRegistry:
@@ -276,7 +290,9 @@ class CharacterRegistry:
                     voice_id=config.get("voice_id"),
                     lora_path=config.get("lora_path"),
                     metadata=config.get("metadata", {}),
-                    aliases=config.get("aliases", [])
+                    aliases=config.get("aliases", []),
+                    voice_sample_path=config.get("voice_sample_path"),
+                    voice_tts_provider=config.get("voice_tts_provider")
                 )
 
                 self.register(asset)
@@ -319,7 +335,9 @@ class CharacterRegistry:
             "voice_id": asset.voice_id,
             "lora_path": asset.lora_path,
             "metadata": asset.metadata,
-            "aliases": asset.aliases
+            "aliases": asset.aliases,
+            "voice_sample_path": asset.voice_sample_path,
+            "voice_tts_provider": asset.voice_tts_provider
         }
 
         config_path = os.path.join(char_dir, "config.json")

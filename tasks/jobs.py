@@ -69,9 +69,17 @@ def render_project_job(self, project_id: str, job_id: str):
             session.commit()
         return {"status": "failed", "reason": "No shots found"}
 
-    from tasks.shots import render_shot
+    from tasks.shots import render_shot, render_shot_seedance
+    from config import settings
 
-    header = [render_shot.s(sid, job_id) for sid in shot_ids]
+    # 根据配置选择渲染工作流
+    if settings.SEEDANCE_ENABLED and settings.ARK_API_KEY:
+        render_task = render_shot_seedance
+        logger.info(f"Using Seedance pipeline for project {project_id}")
+    else:
+        render_task = render_shot
+
+    header = [render_task.s(sid, job_id) for sid in shot_ids]
     callback = compose_project.s(project_id, job_id)
 
     workflow = chord(header)(callback)
@@ -278,9 +286,17 @@ def render_episode_job(self, project_id: str, episode_id: str, job_id: str):
             session.commit()
         return {"status": "failed", "reason": "No shots found"}
 
-    from tasks.shots import render_shot
+    from tasks.shots import render_shot, render_shot_seedance
+    from config import settings
 
-    header = [render_shot.s(sid, job_id) for sid in shot_ids]
+    # 根据配置选择渲染工作流
+    if settings.SEEDANCE_ENABLED and settings.ARK_API_KEY:
+        render_task = render_shot_seedance
+        logger.info(f"Using Seedance pipeline for episode {episode_id}")
+    else:
+        render_task = render_shot
+
+    header = [render_task.s(sid, job_id) for sid in shot_ids]
     callback = compose_episode.s(project_id, episode_id, job_id)
 
     workflow = chord(header)(callback)

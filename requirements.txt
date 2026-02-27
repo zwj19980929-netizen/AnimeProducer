@@ -35,6 +35,9 @@ replicate>=0.25.0
 fal-client>=0.5.0
 oss2>=2.18.0
 
+# 火山引擎 SDK (Seedance 视频生成)
+volcengine-python-sdk[ark]>=1.0.0
+
 # HTTP Client
 requests>=2.31.0
 httpx>=0.26.0

@@ -1,0 +1,337 @@
+新手入门
+视频生成是一个异步过程：
+成功调用 POST /contents/generations/tasks 接口后，API 将返回一个任务 ID 。
+您可以轮询 GET /contents/generations/tasks/{id} 接口，直到任务状态变为 succeeded；或者使用 Webhook 自动接收视频生成任务的状态变化。
+任务完成后，您可在 content.video_url 字段处，下载最终生成的 MP4 文件。
+
+Step1: 创建视频生成任务
+通过 POST /contents/generations/tasks 创建视频生成任务。
+
+
+curl是：
+curl https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ARK_API_KEY" \
+  -d '{
+    "model": "doubao-seedance-1-5-pro-251215",
+    "content": [
+        {
+            "type": "text",
+            "text": "女孩抱着狐狸，女孩睁开眼，温柔地看向镜头，狐狸友善地抱着，镜头缓缓拉出，女孩的头发被风吹动，可以听到风声"
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/i2v_foxrgirl.png"
+            }
+        }
+    ],
+    "generate_audio": true,
+    "ratio": "adaptive",
+    "duration": 5,
+    "watermark": false
+}'
+
+
+
+Step2: 查询视频生成任务
+利用创建视频生成任务时返回的 ID ，您可以查询视频生成任务的详细状态与结果。此接口会返回任务的当前状态（如 queued 、running 、 succeeded 等）以及生成的视频相关信息（如视频下载链接、分辨率、时长等）。
+
+
+说明
+因模型、API负载和视频输出规格的不同，视频生成的过程可能耗时较长。为高效管理这一过程，您可以通过轮询 API 接口（详见 基础使用 和 进阶使用 部分的 SDK 示例）来请求状态更新，或通过 使用 Webhook 通知 接收通知。
+
+curl是：
+# Replace cgt-2025**** with the ID acquired from "Create Video Generation Task".
+
+curl https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-2025**** \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ARK_API_KEY"
+
+
+ 当任务状态变为 succeeded 后，您可在 content.video_url 字段处，下载最终生成的视频文件。
+
+ {
+    "id": "cgt-2025****",
+    "model": "doubao-seedance-1-5-pro-251215",
+    "status": "succeeded",
+    "content": {
+        // Video download URL (file format is MP4)
+        "video_url": "https://ark-content-generation-cn-beijing.tos-cn-beijing.volces.com/****"
+    },
+    "usage": {
+        "completion_tokens": 246840,
+        "total_tokens": 246840
+    },
+    "created_at": 1765510475,
+    "updated_at": 1765510559,
+    "seed": 58944,
+    "resolution": "1080p",
+    "ratio": "16:9",
+    "duration": 5,
+    "framespersecond": 24,
+    "service_tier": "default",
+    "execution_expires_after": 172800
+}
+
+
+模型能力
+| 模型名称 | | Seedance 1.5 pro | Seedance 1.0 pro | Seedance 1.0 pro fast | Seedance 1.0 lite i2v | Seedance-1.0 lite t2v |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Model ID | | doubao-seedance-1-5-pro-251215 | doubao-seedance-1-0-pro-250528 | doubao-seedance-1-0-pro-fast-251015 | doubao-seedance-1-0-lite-t2v-250428 | doubao-seedance-1-0-lite-i2v-250428 |
+| 文生视频 | | ✔️ | ✔️ | ✔️ | ✔️ | ✔️ |
+| 图生视频-首帧 | | ✔️ | ✔️ | ✔️ | ✔️ | — |
+| 图生视频-首尾帧 | | ✔️ | ✔️ | — | ✔️ | — |
+| 生成有声视频 | | ✔️ | — | — | — | — |
+| 样片模式 | | ✔️ | — | — | — | — |
+| 返回视频尾帧 | | ✔️ | ✔️ | ✔️ | ✔️ | ✔️ |
+| 输出视频规格 | 输出分辨率 | 480p, 720p, 1080p | 480p, 720p, 1080p | 480p, 720p, 1080p | 480p, 720p, 1080p | 480p, 720p, 1080p |
+| | 输出宽高比 | 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 | 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 | 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 | 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 | 21:9, 16:9, 4:3, 1:1, 3:4, 9:16 |
+| | 输出时长 | 4~12 秒 | 2~12 秒 | 2~12 秒 | 2~12 秒 | 2~12 秒 |
+| | 输出视频格式 | mp4 | mp4 | mp4 | mp4 | mp4 |
+| 离线推理 | | ✔️ | ✔️ | ✔️ | ✔️ | ✔️ |
+| 在线推理限流 | RPM | 600 | 600 | 600 | 300 | 300 |
+| | 并发数 | 10 | 10 | 10 | 5 | 5 |
+| 离线推理限流 | TPD | 5000亿 | 5000亿 | 5000亿 | 2500亿 | 2500亿 |
+
+
+
+图生视频-基于首帧（含音频）
+通过指定视频的首帧图片，模型能够基于该图片生成与之相关且画面连贯的视频内容。
+Seedance 1.5 pro 可通过设置参数 generate_audio 为 true，生成有声视频。
+
+```python
+import os
+import time
+# Install SDK:  pip install 'volcengine-python-sdk[ark]'
+from volcenginesdkarkruntime import Ark
+
+# Make sure that you have stored the API Key in the environment variable ARK_API_KEY
+# Initialize the Ark client to read your API Key from an environment variable
+client = Ark(
+    # This is the default path. You can configure it based on the service location
+    base_url="https://ark.cn-beijing.volces.com/api/v3",
+    # Get API Key：https://console.volcengine.com/ark/region:ark+cn-beijing/apikey
+    api_key=os.environ.get("ARK_API_KEY"),
+)
+
+if __name__ == "__main__":
+    print("----- create request -----")
+    create_result = client.content_generation.tasks.create(
+        model="doubao-seedance-1-5-pro-251215", # Replace with Model ID
+        content=[
+            {
+                # Combination of text prompt and parameters
+                "type": "text",
+                "text": "女孩抱着狐狸，女孩睁开眼，温柔地看向镜头，狐狸友善地抱着，镜头缓缓拉出，女孩的头发被风吹动，可以听到风声"
+            },
+            {
+                # The URL of the first frame image
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/i2v_foxrgirl.png"
+                }
+            }
+        ],
+        generate_audio=True,
+        ratio="adaptive",
+        duration=5,
+        watermark=False,
+    )
+    print(create_result)
+
+    # Polling query section
+    print("----- polling task status -----")
+    task_id = create_result.id
+    while True:
+        get_result = client.content_generation.tasks.get(task_id=task_id)
+        status = get_result.status
+        if status == "succeeded":
+            print("----- task succeeded -----")
+            print(get_result)
+            break
+        elif status == "failed":
+            print("----- task failed -----")
+            print(f"Error: {get_result.error}")
+            break
+        else:
+            print(f"Current status: {status}, Retrying after 10 seconds...")
+            time.sleep(10)
+```
+
+图生视频-基于首尾帧（含音频）
+
+通过指定视频的起始和结束图片，模型即可生成流畅衔接首、尾帧的视频，实现画面间自然、连贯的过渡效果。
+Seedance 1.5 pro 可通过设置参数 generate_audio 为 true，生成有声视频。
+
+```python
+import os
+import time
+# Install SDK:  pip install 'volcengine-python-sdk[ark]'
+from volcenginesdkarkruntime import Ark
+
+# Make sure that you have stored the API Key in the environment variable ARK_API_KEY
+# Initialize the Ark client to read your API Key from an environment variable
+client = Ark(
+    # This is the default path. You can configure it based on the service location
+    base_url="https://ark.cn-beijing.volces.com/api/v3",
+    # Get API Key：https://console.volcengine.com/ark/region:ark+cn-beijing/apikey
+    api_key=os.environ.get("ARK_API_KEY"),
+)
+
+
+if __name__ == "__main__":
+    print("----- create request -----")
+    create_result = client.content_generation.tasks.create(
+        model="doubao-seedance-1-5-pro-251215", # Replace with Model ID
+        content=[
+            {
+                # Combination of text prompt and parameters
+                "type": "text",
+                "text": "图中女孩对着镜头说\"茄子\"，360度环绕运镜"
+            },
+            {
+                # The URL of the first frame image
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seepro_first_frame.jpeg"
+                },
+                "role": "first_frame"
+            },
+            {
+                # The URL of the last frame image
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seepro_last_frame.jpeg"
+                },
+                "role": "last_frame"
+            }
+        ],
+        generate_audio=True,
+        ratio="adaptive",
+        duration=5,
+        watermark=False,
+    )
+    print(create_result)
+
+    # Polling query section
+    print("----- polling task status -----")
+    task_id = create_result.id
+    while True:
+        get_result = client.content_generation.tasks.get(task_id=task_id)
+        status = get_result.status
+        if status == "succeeded":
+            print("----- task succeeded -----")
+            print(get_result)
+            break
+        elif status == "failed":
+            print("----- task failed -----")
+            print(f"Error: {get_result.error}")
+            break
+        else:
+            print(f"Current status: {status}, Retrying after 10 seconds...")
+            time.sleep(10)
+```
+
+
+图生视频-基于参考图
+模型能精准提取参考图片（支持输入1-4张）中各类对象的关键特征，并依据这些特征在视频生成过程中高度还原对象的形态、色彩和纹理等细节，确保生成的视频与参考图的视觉风格一致。
+
+
+
+```python
+import os
+import time
+# Install SDK:  pip install 'volcengine-python-sdk[ark]'
+from volcenginesdkarkruntime import Ark
+
+# Make sure that you have stored the API Key in the environment variable ARK_API_KEY
+# Initialize the Ark client to read your API Key from an environment variable
+client = Ark(
+    # This is the default path. You can configure it based on the service location
+    base_url="https://ark.cn-beijing.volces.com/api/v3",
+    # Get API Key：https://console.volcengine.com/ark/region:ark+cn-beijing/apikey
+    api_key=os.environ.get("ARK_API_KEY"),
+)
+
+if __name__ == "__main__":
+    print("----- create request -----")
+    try:
+        create_result = client.content_generation.tasks.create(
+            model="doubao-seedance-1-0-lite-i2v-250428",  # Replace with Model ID
+            content=[
+                {
+                    # Combination of text prompt and parameters
+                    "type": "text",
+                    "text": "[图1]戴着眼镜穿着蓝色T恤的男生和[图2]的柯基小狗，坐在[图3]的草坪上，视频卡通风格"
+                },
+                {
+                    # The URL of the first reference image
+                    # 1-4 reference images need to be provided
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seelite_ref_1.png"
+                    },
+                    "role": "reference_image"
+                },
+                {
+                    # The URL of the second reference image
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seelite_ref_2.png"
+                    },
+                    "role": "reference_image"
+                },
+                {
+                    # The URL of the third reference image
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://ark-project.tos-cn-beijing.volces.com/doc_image/seelite_ref_3.png"
+                    },
+                    "role": "reference_image"
+                }
+            ],
+            ratio="16:9",
+            duration=5,
+            watermark=False,
+        )
+        print(create_result)
+
+        # Polling query section
+        print("----- polling task status -----")
+        task_id = create_result.id
+        while True:
+            get_result = client.content_generation.tasks.get(task_id=task_id)
+            status = get_result.status
+            if status == "succeeded":
+                print("----- task succeeded -----")
+                print(get_result)
+                break
+            elif status == "failed":
+                print("----- task failed -----")
+                print(f"Error: {get_result.error}")
+                break
+            else:
+                print(f"Current status: {status}, Retrying after 10 seconds...")
+                time.sleep(10)
+    except Exception as e:
+        print(f"An error occurred: {e}")
+```
+
+管理视频任务
+查询视频生成任务列表
+该接口支持传入条件筛选参数，以查询符合条件的视频生成任务列表。
+
+curl https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks?page_size=2&filter.status=succeeded& \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ARK_API_KEY"
+
+
+删除或取消视频生成任务
+取消排队中的视频生成任务，或者删除视频生成任务记录。
+
+# Replace cgt-2025**** with the ID acquired from "Create Video Generation Task".
+
+curl -X DELETE https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/cgt-2025**** \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ARK_API_KEY"

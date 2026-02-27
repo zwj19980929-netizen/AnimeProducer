@@ -103,14 +103,12 @@ class ProviderFactory:
             return aliyun_video_client
         else:
             raise ValueError(f"未知的视频 Provider: {provider}")
-    
+
     @classmethod
     def get_backup_video_providers(cls) -> List[str]:
         """获取备用视频 Provider 列表"""
         backup_str = settings.BACKUP_VIDEO_PROVIDERS
         return [p.strip() for p in backup_str.split(",") if p.strip()]
-    
-    # ========== LLM Clients ==========
     
     @classmethod
     def get_llm_client(cls, provider: Optional[str] = None) -> BaseLLMClient:
@@ -222,10 +220,30 @@ class ProviderFactory:
         """列出所有可用的 Provider"""
         return {
             "image": ["google", "aliyun", "replicate"],
-            "video": ["google", "replicate", "volcengine", "aliyun"],
+            "video": ["google", "replicate", "volcengine", "aliyun", "seedance"],
             "llm": ["google", "doubao", "deepseek", "openai"],
             "tts": ["openai", "doubao", "aliyun", "minimax", "zhipu"]
         }
+
+    # ========== Seedance Client ==========
+
+    _seedance_client = None
+
+    @classmethod
+    def get_seedance_client(cls):
+        """
+        获取 Seedance 客户端（独立于 VIDEO_PROVIDER 的工作流）
+
+        Seedance 通过 SEEDANCE_ENABLED 配置启用，
+        不走 VIDEO_PROVIDER 的 failover 机制。
+
+        Returns:
+            SeedanceClient 实例
+        """
+        if cls._seedance_client is None:
+            from integrations.seedance_client import get_seedance_client
+            cls._seedance_client = get_seedance_client()
+        return cls._seedance_client
 
     # ========== Smart Failover Methods ==========
 

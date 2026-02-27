@@ -183,6 +183,23 @@ class Settings(BaseSettings):
     CRITIC_MIN_SCORE: int = 8  # 最低通过分数 (0-10)
     CRITIC_MAX_RETRIES: int = 2  # 质量不达标时最大重试次数
 
+    # ========== Seedance Settings (火山引擎) ==========
+    # API Key 从火山引擎控制台获取: https://console.volcengine.com/ark/region:ark+cn-beijing/apikey
+    ARK_API_KEY: str = ""  # 火山引擎 Ark API Key
+
+    SEEDANCE_ENABLED: bool = True  # 是否启用 Seedance
+    # 模型 ID: doubao-seedance-1-5-pro-251215 (当前), doubao-seedance-2-0 (未来)
+    SEEDANCE_MODEL: str = "doubao-seedance-1-5-pro-251215"
+    SEEDANCE_DEFAULT_RESOLUTION: str = "1080p"  # 480p, 720p, 1080p
+    SEEDANCE_DEFAULT_DURATION: int = 5  # 默认视频时长 (4-12秒)
+    SEEDANCE_DEFAULT_RATIO: str = "16:9"  # 21:9, 16:9, 4:3, 1:1, 3:4, 9:16, adaptive
+    SEEDANCE_ENABLE_AUDIO: bool = True  # 是否启用原生音频生成 (仅 1.5 Pro)
+    SEEDANCE_AUDIO_LANGUAGE: str = "zh"  # 音频语言
+
+    # 音色样本设置
+    VOICE_SAMPLE_DURATION: float = 5.0  # 音色样本时长（秒）
+    VOICE_SAMPLE_TTS_PROVIDER: str = "aliyun"  # 生成音色样本的 TTS 提供商
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

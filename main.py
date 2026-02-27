@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import assets, books, chapters, episodes, jobs, projects, ws, auth, lora
+from api.routes import assets, books, chapters, episodes, jobs, projects, ws, auth, lora, voices
 from api.websocket import manager as ws_manager
 from config import settings
 from core.database import init_db
@@ -141,6 +141,7 @@ app.include_router(books.router, prefix="/api/v1/projects/{project_id}/book", ta
 app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
 app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["jobs"])
 app.include_router(lora.router, prefix="/api/v1/lora", tags=["lora"])
+app.include_router(voices.router, prefix="/api/v1/voices", tags=["voices"])
 
 if settings.DEBUG:
     from api.routes import api_test
@@ -150,3 +151,8 @@ app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
 if settings.DEBUG:
     app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")
+
+
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG)
