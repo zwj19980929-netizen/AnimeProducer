@@ -1,5 +1,7 @@
 """API Key testing routes for validating provider configurations."""
 
+__test__ = False
+
 import logging
 import time
 from datetime import datetime

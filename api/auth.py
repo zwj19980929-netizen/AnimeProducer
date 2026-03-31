@@ -6,12 +6,15 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
+from sqlmodel import Session, select
 
 from config import settings
+from core.database import engine
+from core.models import UserAccount
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +26,9 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = getattr(settings, 'ACCESS_TOKEN_EXPIRE_MINUTES', 60 * 24)  # 24 hours
 
 # Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Prefer PBKDF2 for stable local/dev compatibility, while still verifying any
+# existing bcrypt hashes that may already be stored in the database.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 
 # Security schemes
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -53,7 +58,11 @@ class User(BaseModel):
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as exc:
+        logger.warning("Password verification failed due to hash backend error: %s", exc)
+        return False
 
 
 def get_password_hash(password: str) -> str:
@@ -88,6 +97,39 @@ def decode_token(token: str) -> Optional[TokenData]:
         return None
 
 
+def get_user_account_by_username(username: str) -> UserAccount | None:
+    """Load a persisted user account by username."""
+    with Session(engine) as session:
+        return session.exec(
+            select(UserAccount).where(UserAccount.username == username)
+        ).first()
+
+
+def ensure_default_admin_user() -> None:
+    """Create the configured default admin user when missing."""
+    admin_password = getattr(settings, "ADMIN_PASSWORD", "")
+    admin_username = getattr(settings, "ADMIN_USERNAME", "admin")
+    if not admin_password:
+        return
+
+    with Session(engine) as session:
+        existing = session.exec(
+            select(UserAccount).where(UserAccount.username == admin_username)
+        ).first()
+        if existing:
+            return
+
+        session.add(
+            UserAccount(
+                username=admin_username,
+                hashed_password=get_password_hash(admin_password),
+                scopes=["read", "write", "admin"],
+            )
+        )
+        session.commit()
+        logger.info("Default admin user '%s' initialized", admin_username)
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     api_key: Optional[str] = Depends(api_key_header)
@@ -103,7 +145,13 @@ async def get_current_user_optional(
     if credentials:
         token_data = decode_token(credentials.credentials)
         if token_data:
-            return User(username=token_data.sub, scopes=token_data.scopes)
+            account = get_user_account_by_username(token_data.sub)
+            if account:
+                return User(
+                    username=account.username,
+                    disabled=account.disabled,
+                    scopes=list(account.scopes or token_data.scopes or ["read", "write"]),
+                )
 
     return None
 
@@ -114,7 +162,7 @@ async def get_current_user(
 ) -> User:
     """Get current user from token or API key (required)."""
     # Check if auth is disabled
-    if getattr(settings, 'AUTH_DISABLED', True):
+    if getattr(settings, 'AUTH_DISABLED', False):
         return User(username="anonymous", scopes=["read", "write"])
 
     user = await get_current_user_optional(credentials, api_key)

@@ -106,6 +106,20 @@ class Project(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class UserAccount(SQLModel, table=True):
+    """持久化用户账号。"""
+    __tablename__ = "user_accounts"
+
+    id: str = Field(default_factory=generate_uuid, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    hashed_password: str
+    disabled: bool = Field(default=False)
+    scopes: list[str] = Field(default_factory=lambda: ["read", "write"], sa_column=Column(JSON))
+
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class Job(SQLModel, table=True):
     """Celery 异步任务记录。"""
     __tablename__ = "jobs"

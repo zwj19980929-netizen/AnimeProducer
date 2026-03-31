@@ -8,14 +8,14 @@ _SAFE_SEGMENT_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 class Settings(BaseSettings):
     # Core Settings
-    PROJECT_NAME: str = "AnimeMatrix"
+    PROJECT_NAME: str = "AnimeProducer"
     DEBUG: bool = False
     API_VERSION: str = "v1"
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
 
     # Authentication Settings
-    AUTH_DISABLED: bool = True  # Set to False to enable authentication
+    AUTH_DISABLED: bool = False
     SECRET_KEY: str = ""  # JWT secret key (auto-generated if empty)
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 24 hours
     API_KEY: str = ""  # Optional API key for service-to-service auth
@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "sqlite:///./animematrix.db"
+    ALLOW_DATABASE_FALLBACK_IN_DEBUG: bool = True
+    DEV_DATABASE_FALLBACK_URL: str = "sqlite:///./animematrix.db"
 
     # LLM API Keys
     GOOGLE_API_KEY: str = ""

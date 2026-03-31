@@ -20,6 +20,15 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: apiTarget,
           changeOrigin: true
+        },
+        '/assets': {
+          target: apiTarget,
+          changeOrigin: true
+        },
+        '/ws': {
+          target: apiTarget,
+          changeOrigin: true,
+          ws: true
         }
       }
     }

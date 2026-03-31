@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api.routes import assets, books, chapters, episodes, jobs, projects, ws, auth, lora, voices
+from api.routes import assets, auth, books, chapters, episodes, jobs, lora, projects, voices, workbench, ws
 from api.websocket import manager as ws_manager
 from config import settings
 from core.database import init_db
@@ -134,6 +134,7 @@ def api_info():
 
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(workbench.router, prefix="/api/v1/workbench", tags=["workbench"])
 app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
 app.include_router(chapters.router, prefix="/api/v1/projects/{project_id}/chapters", tags=["chapters"])
 app.include_router(episodes.router, prefix="/api/v1/projects/{project_id}/episodes", tags=["episodes"])
@@ -149,10 +150,16 @@ if settings.DEBUG:
 
 app.include_router(ws.router, prefix="/ws", tags=["websocket"])
 
-if settings.DEBUG:
-    app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")
+app.mount("/assets", StaticFiles(directory=settings.ASSETS_DIR), name="assets")
 
 
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=settings.DEBUG)
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.DEBUG,
+        log_level=settings.LOG_LEVEL.lower(),
+    )
